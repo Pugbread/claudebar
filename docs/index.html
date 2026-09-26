@@ -1,0 +1,814 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Claudebar: Claude Code and Codex, live in your notch</title>
+<meta name="description" content="A macOS app that turns your MacBook's notch into a live activity bar for Claude Code and Codex: what it's editing, what it's running, how long it's been at it, and when it needs you.">
+<meta property="og:title" content="Claudebar">
+<meta property="og:description" content="Claude Code and Codex, live in your MacBook's notch.">
+<meta property="og:image" content="https://pugbread.github.io/claudebar/images/og.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anybody:wdth,wght@50..150,400..900&family=Hanken+Grotesk:wght@400;500;600&family=Martian+Mono:wdth,wght@75..112.5,400..700&display=swap" rel="stylesheet">
+<style>
+/* ---------- tokens ---------- */
+:root {
+  --alu: #E4E6E9;          /* silver aluminium */
+  --alu-hi: #F4F5F7;       /* light on the lid */
+  --plate: #ECEEF1;        /* raised surfaces */
+  --rule: rgba(16, 18, 22, .10);
+  --ink: #101216;
+  --ink-2: #555B66;
+  --menubar: rgba(246, 247, 249, .72);
+  --menubar-ink: #16181C;
+
+  --black: #000;
+  --coral: #F28F66;
+  --codex: #7D99FF;
+  --violet: #B08CFF;
+  --sky: #6BB0FF;
+  --mint: #52E3AD;
+  --amber: #FFC44A;
+  --green: #61E887;
+  --red: #FF6E6E;
+
+  --bar-h: 32px;
+  --notch-w: 190px;
+  --panel-w: min(580px, calc(100vw - 24px));
+
+  --display: "Anybody", system-ui, sans-serif;
+  --body: "Hanken Grotesk", system-ui, sans-serif;
+  --mono: "Martian Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-finish="silver"]) {
+    --alu: #16181B; --alu-hi: #24272C; --plate: #1D2024; --rule: rgba(255,255,255,.09);
+    --ink: #ECEEF1; --ink-2: #9AA1AC; --menubar: rgba(28, 30, 34, .72); --menubar-ink: #E8EAED;
+    color-scheme: dark;
+  }
+}
+:root[data-finish="space"] {
+  --alu: #16181B; --alu-hi: #24272C; --plate: #1D2024; --rule: rgba(255,255,255,.09);
+  --ink: #ECEEF1; --ink-2: #9AA1AC; --menubar: rgba(28, 30, 34, .72); --menubar-ink: #E8EAED;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 72px; }
+body {
+  margin: 0;
+  background: radial-gradient(1400px 700px at 50% -12%, var(--alu-hi), transparent 62%), var(--alu);
+  color: var(--ink);
+  font: 17px/1.58 var(--body);
+  -webkit-font-smoothing: antialiased;
+  transition: background-color .5s, color .5s;
+}
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--codex); outline-offset: 3px; border-radius: 6px; }
+code, .mono { font-family: var(--mono); font-size: .86em; }
+
+/* ---------- the faux menu bar ---------- */
+.menubar {
+  position: fixed; inset: 0 0 auto; height: var(--bar-h); z-index: 40;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 14px;
+  background: var(--menubar);
+  backdrop-filter: saturate(1.6) blur(18px); -webkit-backdrop-filter: saturate(1.6) blur(18px);
+  font: 500 13px/1 system-ui, -apple-system, sans-serif;
+  color: var(--menubar-ink);
+}
+.menubar nav, .menubar .status { display: flex; align-items: center; gap: 18px; }
+.menubar .app { font-weight: 700; }
+.menubar a { text-decoration: none; opacity: .9; }
+.menubar a:hover { opacity: 1; }
+.finish { display: inline-flex; border-radius: 6px; padding: 2px; background: color-mix(in srgb, var(--menubar-ink) 9%, transparent); }
+.finish button {
+  border: 0; background: none; color: inherit; font: inherit; font-size: 11.5px;
+  padding: 3px 8px; border-radius: 4px; cursor: pointer; opacity: .65;
+}
+.finish button[aria-pressed="true"] { background: var(--alu-hi); opacity: 1; box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.clock-now { font-variant-numeric: tabular-nums; }
+/* The live notch's left ear reaches ~360px left of centre; keep the menu bar clear of it. */
+#live .label .text { max-width: 230px; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 1099px) {
+  .menubar .finish, .menubar .clock-now { display: none; }
+  #live .label .text { max-width: 140px; }
+}
+@media (max-width: 760px) {
+  .menubar .status > a, .menubar nav { display: none; }
+  :root { --notch-w: 128px; }
+}
+
+/* ---------- the island ---------- */
+.island {
+  position: fixed; top: 0; left: 50%; width: 0; height: 0; z-index: 50;
+  --tint: var(--coral);
+  filter: drop-shadow(0 0 0 transparent);
+  transition: filter .6s ease;
+}
+.island.lit { filter: drop-shadow(0 2px 14px color-mix(in srgb, var(--tint) 55%, transparent)); }
+.island.st-waiting.lit { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse {
+  50% { filter: drop-shadow(0 2px 22px color-mix(in srgb, var(--tint) 90%, transparent)); }
+}
+.shape { position: absolute; top: 0; left: 0; transform-origin: 50% 0; }
+.island.jelly .shape { animation: jelly .7s cubic-bezier(.3,1.6,.5,1); }
+@keyframes jelly { 20% { transform: scale(1.07, 1.16); } 45% { transform: scale(.98, .95); } }
+
+.gap, .ear, .panel { position: absolute; top: 0; background: var(--black); }
+.gap {
+  left: calc(var(--notch-w) / -2); width: var(--notch-w); height: var(--bar-h);
+  border-radius: 0 0 12px 12px;
+  transition: border-radius .35s;
+}
+.island.open .gap { border-radius: 0; }
+.ear {
+  height: var(--bar-h); width: 0;
+  display: flex; align-items: center; white-space: nowrap;
+  color: #fff;
+  transition: width .55s cubic-bezier(.34, 1.25, .5, 1), border-radius .35s;
+}
+.ear.left { right: calc(var(--notch-w) / 2); justify-content: flex-end; padding: 0 0 0 14px; border-bottom-left-radius: 15px; }
+.ear.right { left: calc(var(--notch-w) / 2); justify-content: flex-start; padding: 0 14px 0 0; border-bottom-right-radius: 15px; }
+/* the ear itself doesn't clip, so its shoulder can hang outside it; this does */
+.ear > .clip { flex: 1; min-width: 0; height: 100%; overflow: hidden; display: flex; align-items: center; }
+.ear.left > .clip { justify-content: flex-end; }
+.ear .content { display: flex; align-items: center; gap: 8px; padding: 0 12px; flex: none; }
+.ear.left .content { padding-left: 0; }
+.ear.right .content { padding-right: 0; }
+
+/* concave shoulders where the island melts into the screen edge */
+.shoulder { position: absolute; top: 0; width: 9px; height: 9px; opacity: 0; transition: opacity .3s; }
+.island.open .shoulder { opacity: 1; }
+.shoulder.l { background: radial-gradient(circle at 0 100%, transparent 8.5px, #000 9px); }
+.shoulder.r { background: radial-gradient(circle at 100% 100%, transparent 8.5px, #000 9px); }
+
+.panel {
+  left: calc(var(--panel-w) / -2); width: var(--panel-w); top: var(--bar-h);
+  display: grid; grid-template-rows: 0fr;
+  border-radius: 0 0 30px 30px;
+  transition: grid-template-rows .5s cubic-bezier(.3, 1.1, .4, 1);
+}
+.panel > .inner { overflow: hidden; }
+.island.expanded .panel { grid-template-rows: 1fr; }
+.island.expanded .ear { border-radius: 0; }
+/* like the app: expanded, the top row keeps just the icon; the card below has the detail */
+.island.expanded .ear .label .text { display: none; }
+.panel .content { padding: 8px 16px 16px; opacity: 0; filter: blur(6px); transform: translateY(-6px); transition: opacity .35s .08s, filter .35s .08s, transform .35s .08s; }
+.island.expanded .panel .content { opacity: 1; filter: none; transform: none; }
+
+/* ear contents */
+.glyph { width: 17px; height: 17px; flex: none; color: var(--tint); display: grid; place-items: center; }
+.glyph svg { width: 100%; height: 100%; overflow: visible; filter: drop-shadow(0 0 3px currentColor); }
+/* the glyph is drawn around (0,0) of its viewBox; spin it there */
+.glyph .spin { transform-box: view-box; transform-origin: 0 0; }
+.st-thinking .glyph .spin { animation: spin 7s linear infinite, breathe 1.1s ease-in-out infinite alternate; }
+.st-tool .glyph .spin { animation: spin 2.4s linear infinite, breathe .42s ease-in-out infinite alternate; }
+.st-waiting .glyph .spin { animation: breathe .65s ease-in-out infinite alternate; }
+@keyframes spin { to { rotate: 360deg; } }
+@keyframes breathe { from { scale: .86; } to { scale: 1.04; } }
+.timer { font: 600 13px/1 var(--mono); font-variation-settings: "wdth" 90; color: var(--tint); font-variant-numeric: tabular-nums; }
+.label { display: flex; align-items: center; gap: 6px; font: 500 12px/1 var(--mono); font-variation-settings: "wdth" 88; color: rgba(255,255,255,.58); }
+.label svg { width: 12px; height: 12px; color: var(--tint); flex: none; }
+.label.swap { animation: swap .45s ease; }
+@keyframes swap { from { opacity: 0; filter: blur(4px); translate: 0 -3px; } }
+.st-waiting .label, .st-waiting .label svg { color: var(--amber); }
+.st-done .label { color: var(--green); }
+.diff { font: 600 12px/1 var(--mono); font-variation-settings: "wdth" 90; font-variant-numeric: tabular-nums; display: flex; gap: 6px; }
+.add { color: var(--green); }
+.rem { color: var(--red); }
+.meter { display: flex; align-items: center; gap: 2px; height: 14px; color: var(--tint); filter: drop-shadow(0 0 2px currentColor); }
+.meter i { display: block; width: 2.5px; height: 14px; border-radius: 2px; background: currentColor; scale: 1 .25; transition: scale .4s; }
+.st-thinking .meter i, .st-tool .meter i { animation: level var(--d) ease-in-out infinite alternate; }
+.st-waiting .meter i { animation: level .7s ease-in-out infinite alternate; }
+.st-done .meter i:nth-child(1) { scale: 1 .65; } .st-done .meter i:nth-child(2) { scale: 1 .9; }
+.st-done .meter i:nth-child(3) { scale: 1 .5; } .st-done .meter i:nth-child(4) { scale: 1 .75; }
+@keyframes level { from { scale: 1 .2; } to { scale: 1 1; } }
+
+.burst { position: absolute; inset: 50% auto auto 50%; pointer-events: none; }
+.burst i {
+  position: absolute; width: 3px; height: 3px; margin: -1.5px; border-radius: 50%; background: var(--green);
+  animation: fly .9s cubic-bezier(.2, .8, .3, 1) forwards;
+}
+.burst i:nth-child(3n) { background: #fff; }
+@keyframes fly { to { translate: var(--x) var(--y); opacity: 0; scale: .3; } }
+
+.hint-tag {
+  position: absolute; top: calc(var(--bar-h) + 10px); left: 50%; translate: -50% 0; white-space: nowrap;
+  font: 500 11px/1 var(--mono); color: var(--ink-2); opacity: 0; transition: opacity .4s;
+  pointer-events: none;
+}
+.hint-tag.show { opacity: .8; }
+@media (hover: none) { .hint-tag { display: none; } }
+@media (max-width: 560px) { .label .text { display: none; } }
+
+/* ---------- panel (also used for the static showcase) ---------- */
+.card {
+  background: rgba(255,255,255,.055); border: 1px solid rgba(255,255,255,.06);
+  border-radius: 16px; padding: 12px; color: #fff; margin-top: 8px;
+}
+.card-head { display: flex; align-items: center; gap: 10px; }
+.tile {
+  width: 30px; height: 30px; border-radius: 8px; flex: none; position: relative;
+  display: grid; place-items: center; color: var(--tint);
+  background: linear-gradient(160deg, #26282e, #111216);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
+}
+.tile .glyph { width: 16px; height: 16px; }
+.tile .dot { position: absolute; right: -3px; bottom: -3px; width: 10px; height: 10px; border-radius: 50%; background: var(--tint); box-shadow: 0 0 0 2px #000; }
+.who { flex: 1; min-width: 0; }
+.name { display: flex; align-items: center; gap: 7px; font: 600 13.5px/1.25 var(--body); }
+.badge { font: 700 9.5px/1 var(--mono); color: rgba(255,255,255,.6); background: rgba(255,255,255,.09); border-radius: 99px; padding: 4px 6px; }
+.status { font: 500 12px/1.4 var(--body); color: rgba(255,255,255,.55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nums { text-align: right; }
+.nums .timer { display: block; font-size: 14px; margin-bottom: 4px; }
+.prompt { margin: 10px 0 0; font: italic 12px/1.4 var(--body); color: rgba(255,255,255,.55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.log { list-style: none; margin: 10px 0 0; padding: 8px 10px; background: rgba(0,0,0,.45); border-radius: 11px; display: grid; gap: 6px; }
+.log li { display: flex; align-items: center; gap: 8px; font: 500 11.5px/1.2 var(--body); color: rgba(255,255,255,.85); opacity: .75; }
+.log li.running { opacity: 1; }
+.log svg { width: 11px; height: 11px; flex: none; }
+.log .what { font-weight: 600; }
+.log .detail { font: 400 11px/1.2 var(--mono); font-variation-settings: "wdth" 85; color: rgba(255,255,255,.55); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.log .end { font: 500 10.5px/1 var(--mono); color: rgba(255,255,255,.35); display: flex; gap: 5px; align-items: center; }
+.spinner { width: 10px; height: 10px; border-radius: 50%; border: 1.6px solid currentColor; border-right-color: transparent; animation: spin .7s linear infinite; }
+.say { display: flex; gap: 8px; margin: 10px 0 0; font: 12px/1.45 var(--body); color: rgba(255,255,255,.8); }
+.say .glyph { width: 12px; height: 12px; margin-top: 2px; }
+.stats { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 10px; font: 500 10.5px/1 var(--mono); font-variation-settings: "wdth" 85; color: rgba(255,255,255,.32); }
+.today { display: flex; align-items: center; gap: 14px; margin: 12px 6px 0; font: 500 11px/1 var(--mono); font-variation-settings: "wdth" 85; color: rgba(255,255,255,.5); }
+.today b { font-weight: 800; letter-spacing: .12em; font-size: 9px; color: rgba(255,255,255,.32); }
+
+/* ---------- page ---------- */
+main { padding-top: calc(var(--bar-h) + 24px); }
+.wrap { width: min(1100px, calc(100vw - 40px)); margin: 0 auto; }
+
+.hero { text-align: center; padding: 14vh 0 12vh; }
+.hero h1 {
+  margin: 0; font-family: var(--display); font-weight: 820; line-height: .9;
+  font-size: clamp(36px, calc((100vw - 48px) / 8.9), 124px); letter-spacing: -.035em;
+  font-variation-settings: "wdth" 150;
+}
+.hero h1.grow { animation: grow 1.4s .5s cubic-bezier(.34, 1.2, .4, 1) backwards; }
+@keyframes grow { from { font-variation-settings: "wdth" 50; letter-spacing: -.02em; } }
+.lede { max-width: 36em; margin: 28px auto 0; font-size: clamp(17px, 2vw, 20px); color: var(--ink-2); }
+.lede strong { color: var(--ink); font-weight: 600; }
+.get {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 34px; max-width: 100%;
+  background: #0A0B0D; color: #fff; border-radius: 14px; padding: 6px 6px 6px 18px;
+  box-shadow: 0 1px 0 rgba(255,255,255,.4) inset, 0 12px 30px -12px rgba(0,0,0,.45);
+}
+.get code { min-width: 0; font-size: 12.5px; font-variation-settings: "wdth" 88; white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
+.get code .p { color: var(--mint); user-select: none; }
+.copy {
+  border: 0; font: 600 12.5px/1 var(--body); color: #0A0B0D; background: #fff; border-radius: 9px;
+  padding: 10px 14px; cursor: pointer; flex: none; margin-left: 10px;
+}
+.copy:hover { background: var(--alu-hi); }
+.fine { margin-top: 16px; font: 500 12px/1.5 var(--mono); font-variation-settings: "wdth" 88; color: var(--ink-2); }
+.fine a { text-underline-offset: 3px; }
+
+section.block { padding: 88px 0; border-top: 1px solid var(--rule); }
+.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 48px; align-items: start; }
+/* grid items default to min-width: auto, which lets a long <pre> line widen the page */
+.split > * { min-width: 0; }
+@media (max-width: 860px) { .split { grid-template-columns: 1fr; gap: 28px; } }
+h2 {
+  margin: 0; font-family: var(--display); font-weight: 760; font-size: clamp(30px, 3.6vw, 44px);
+  line-height: 1; letter-spacing: -.02em; font-variation-settings: "wdth" 128;
+}
+.split .aside p { color: var(--ink-2); margin: 16px 0 0; max-width: 24em; }
+
+/* state reel */
+.reel { display: grid; gap: 14px; }
+.shot {
+  position: relative; z-index: 0;
+  background: var(--plate); border: 1px solid var(--rule); border-radius: 18px; overflow: hidden;
+}
+.shot .screen {
+  position: relative; height: 64px; overflow: hidden;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--menubar-ink) 7%, transparent) 0 26px, transparent 26px);
+}
+.shot .island { position: absolute; }
+.shot p { margin: 0; padding: 14px 16px 16px; font-size: 15px; color: var(--ink-2); }
+.shot p b { color: var(--ink); font-weight: 600; }
+.shot .island { z-index: auto; --bar-h: 26px; --notch-w: 84px; filter: drop-shadow(0 2px 12px color-mix(in srgb, var(--tint) 45%, transparent)); }
+.shot .island .ear { transition: none; }
+.shot .label .text { max-width: 128px; overflow: hidden; text-overflow: ellipsis; }
+
+/* the expanded island, pinned in place for the showcase */
+.stage { position: relative; z-index: 0; max-width: 580px; }
+.stage .island { position: absolute; z-index: auto; --panel-w: 100%; }
+.stage .island .panel { left: 0; }
+.stage .island .shape { left: 0; width: 100%; }
+
+/* panel showcase */
+.showcase-wrap { display: grid; gap: 28px; }
+.facts { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px 28px; }
+.facts li { color: var(--ink-2); font-size: 15px; }
+.facts b { display: block; color: var(--ink); font-weight: 600; margin-bottom: 2px; }
+
+/* pipeline */
+.pipe { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font: 500 12.5px/1 var(--mono); font-variation-settings: "wdth" 90; }
+.pipe span { background: #0A0B0D; color: #fff; padding: 10px 12px; border-radius: 10px; }
+.pipe .arrow { background: none; color: var(--ink-2); padding: 0; }
+.steps { list-style: none; counter-reset: s; margin: 28px 0 0; padding: 0; display: grid; gap: 18px; }
+.steps li { counter-increment: s; display: grid; grid-template-columns: 34px 1fr; gap: 12px; color: var(--ink-2); }
+.steps li::before {
+  content: counter(s); font: 700 13px/30px var(--mono); text-align: center; color: var(--ink);
+  width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--rule); background: var(--plate);
+}
+.steps b { color: var(--ink); font-weight: 600; }
+
+/* spec sheet */
+.specs { margin: 0; display: grid; grid-template-columns: minmax(150px, 220px) 1fr; border-top: 1px solid var(--rule); }
+.specs dt, .specs dd { margin: 0; padding: 14px 0; border-bottom: 1px solid var(--rule); }
+.specs dt { color: var(--ink-2); font-size: 15px; }
+.specs dd { font: 500 13px/1.6 var(--mono); font-variation-settings: "wdth" 92; }
+@media (max-width: 560px) { .specs { grid-template-columns: 1fr; } .specs dt { border-bottom: 0; padding-bottom: 0; } }
+
+/* install */
+.term { background: #0A0B0D; color: #E8EAED; border-radius: 16px; padding: 18px 20px; overflow-x: auto; font: 12.5px/1.9 var(--mono); font-variation-settings: "wdth" 90; }
+.term .p { color: var(--mint); user-select: none; }
+.term .c { color: rgba(255,255,255,.4); }
+
+footer { border-top: 1px solid var(--rule); padding: 36px 0 60px; color: var(--ink-2); font-size: 14px; }
+footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<div class="menubar" role="navigation" aria-label="Page">
+  <nav>
+    <a class="app" href="#top">Claudebar</a>
+  </nav>
+  <div class="status">
+    <div class="finish" role="group" aria-label="Page finish">
+      <button type="button" data-finish="silver">Silver</button>
+      <button type="button" data-finish="space">Space Black</button>
+    </div>
+    <a href="https://github.com/Pugbread/claudebar">GitHub</a>
+    <span class="clock-now" aria-hidden="true"></span>
+  </div>
+</div>
+
+<div class="island" id="live" tabindex="0" role="img" aria-label="Live demo of Claudebar in a MacBook notch. Hover or focus it to expand."></div>
+
+<main id="top">
+  <section class="hero wrap">
+    <h1 class="grow">Claudebar</h1>
+    <p class="lede">Your MacBook's notch, showing what <strong>Claude Code</strong> and <strong>Codex</strong> are doing right now: the file being edited, the command running, how long the turn has taken, and the moment it needs you.</p>
+    <div class="get">
+      <code><span class="p">$ </span>git clone https://github.com/Pugbread/claudebar &amp;&amp; cd claudebar &amp;&amp; ./scripts/install.sh</code>
+      <button class="copy" type="button" data-copy="git clone https://github.com/Pugbread/claudebar && cd claudebar && ./scripts/install.sh">Copy</button>
+    </div>
+    <p class="fine">macOS 15 or later · Xcode command line tools · jq · <a href="https://github.com/Pugbread/claudebar">source on GitHub</a></p>
+  </section>
+
+  <section class="block" id="shows">
+    <div class="wrap split">
+      <div class="aside">
+        <h2>What the notch shows</h2>
+        <p>Nothing, until an agent starts working. Then the notch grows to the size of what it has to say, and shrinks back when it's done.</p>
+      </div>
+      <div class="reel" id="reel"></div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="wrap split">
+      <div class="aside">
+        <h2>Hover for the whole picture</h2>
+        <p>Every running session, what you asked, the tools it just used, the last thing it said, and today's totals. Click a card to jump to the app it's running in.</p>
+      </div>
+      <div class="showcase-wrap">
+        <div class="stage" id="showcase"><div class="island"></div></div>
+        <ul class="facts">
+          <li><b>Several sessions at once</b>A count badge shows how many are working. The bar follows whichever one needs you.</li>
+          <li><b>Claude and Codex side by side</b>Each gets its own mark and colors, so you can tell them apart at a glance.</li>
+          <li><b>Picks up where it left off</b>Restart the app mid-turn and it restores every session, including turns that finished while it was closed.</li>
+          <li><b>Chimes when it matters</b>A soft sound when a long turn finishes or an agent needs you, unless you're already looking at it.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="how">
+    <div class="wrap split">
+      <div class="aside">
+        <h2>How it works</h2>
+        <p>No screen reading and no polling. Claudebar listens to the same hooks Claude Code and Codex already support.</p>
+      </div>
+      <div>
+        <div class="pipe" aria-label="Event flow">
+          <span>Claude Code / Codex</span><span class="arrow">→</span>
+          <span>hook (async)</span><span class="arrow">→</span>
+          <span>claudebar-hook.sh</span><span class="arrow">→</span>
+          <span>127.0.0.1:47823</span><span class="arrow">→</span>
+          <span>the notch</span>
+        </div>
+        <ol class="steps">
+          <li><div><b>The agent fires a hook</b> when you send a prompt, it calls a tool, it asks permission, or it finishes. Hooks run async, so the agent never waits on Claudebar.</div></li>
+          <li><div><b>A 20-line script forwards the event</b> to the app over loopback with <code>curl</code>. If Claudebar isn't running, the request fails instantly and nothing happens.</div></li>
+          <li><div><b>Claudebar keeps score.</b> It tracks each session's state, counts lines from each edit's patch, and reads new lines of the session transcript for context and token use.</div></li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="specs">
+    <div class="wrap split">
+      <div class="aside">
+        <h2>Specs</h2>
+        <p>Built to sit in the corner of your eye all day without costing you anything.</p>
+      </div>
+      <dl class="specs">
+        <dt>CPU when idle</dt><dd>0%</dd>
+        <dt>CPU while an agent works</dt><dd>~5% of one core. The spark, glow and meter are Core Animation layers driven by the render server.</dd>
+        <dt>Network</dt><dd>Loopback only, 127.0.0.1:47823</dd>
+        <dt>Permissions</dt><dd>None. No Accessibility, no Screen Recording.</dd>
+        <dt>Answers permission prompts</dt><dd>Never. It only displays.</dd>
+        <dt>Agents</dt><dd>Claude Code (CLI, IDE extensions, desktop Code tab) · Codex (CLI, desktop)</dd>
+        <dt>Displays</dt><dd>Wraps the notch on MacBooks, floats as an island on external displays</dd>
+        <dt>Requires</dt><dd>macOS 15+, Xcode command line tools, jq</dd>
+        <dt>License</dt><dd>MIT</dd>
+      </dl>
+    </div>
+  </section>
+
+  <section class="block" id="install">
+    <div class="wrap split">
+      <div class="aside">
+        <h2>Install</h2>
+        <p>It builds on your Mac, so there's no unsigned download for macOS to block.</p>
+      </div>
+      <div>
+        <pre class="term"><span class="p">$ </span>git clone https://github.com/Pugbread/claudebar
+<span class="p">$ </span>cd claudebar
+<span class="p">$ </span>./scripts/install.sh
+<span class="c"># builds Claudebar.app into ~/Applications, registers the hooks,</span>
+<span class="c"># keeps a backup of each settings file, and starts it at login</span></pre>
+        <ol class="steps">
+          <li><div><b>Run the installer.</b> It adds Claudebar's hooks next to any you already have in Claude Code's <code>settings.json</code> and Codex's <code>hooks.json</code>.</div></li>
+          <li><div><b>Using Codex? Trust the hooks.</b> Codex only runs hooks you've reviewed: open it, run <code>/hooks</code>, and trust the Claudebar ones.</div></li>
+          <li><div><b>Start a session.</b> The notch lights up on your next prompt. Right-click it for sounds, glow, compact mode and a demo.</div></li>
+        </ol>
+        <p class="fine">Changed your mind? <code>./scripts/uninstall.sh</code> removes the hooks, the script and the app.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Claudebar · MIT license · <a href="https://github.com/Pugbread/claudebar">GitHub</a></span>
+    <span>Not affiliated with Anthropic or OpenAI.</span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  // ---------- icons ----------
+  const icons = {
+    edit: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 2.5l2.5 2.5L6 12.5 3 13l.5-3z"/></svg>',
+    read: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M4 1.8h5.5L12.5 5v9.2h-8.5z"/><path d="M6.5 8h4M6.5 11h4" stroke-linecap="round"/></svg>',
+    search: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="7" cy="7" r="4.3"/><path d="M10.3 10.3L14 14"/></svg>',
+    shell: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="2.5"/><path d="M4.5 6.5l2 1.5-2 1.5M8.5 10h3"/></svg>',
+    hand: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 7V3a1 1 0 012 0v3.5h.5V2a1 1 0 012 0v4.5h.5V3a1 1 0 012 0v5.5h.3l.6-1.4a1 1 0 011.8.8l-1.7 4.3A4 4 0 019.3 15H8a4 4 0 01-4-4V7a.5.5 0 011 0z"/></svg>',
+    check: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3.2L13 4.5"/></svg>',
+  };
+  const kinds = {
+    edit: 'var(--violet)', read: 'var(--sky)', search: 'var(--sky)', shell: 'var(--mint)',
+  };
+
+  // Claude's asterisk: twelve rays of uneven length. Codex: an even eight-point star.
+  function glyphSVG(agent) {
+    const lengths = agent === 'codex' ? [1, .5, 1, .5, 1, .5, 1, .5] : [1, .64, .9, .7, .97, .6, .86, .68, .94, .62, .88, .74];
+    const rays = lengths.map((l, i) => {
+      const a = i / lengths.length * Math.PI * 2, r = 10.5 * l;
+      return `<line x1="${(Math.cos(a) * 1.6).toFixed(2)}" y1="${(Math.sin(a) * 1.6).toFixed(2)}" x2="${(Math.cos(a) * r).toFixed(2)}" y2="${(Math.sin(a) * r).toFixed(2)}"/>`;
+    }).join('');
+    return `<svg viewBox="-12 -12 24 24" aria-hidden="true"><g class="spin" stroke="currentColor" stroke-width="2.3" stroke-linecap="round">${rays}</g></svg>`;
+  }
+
+  // ---------- the scripted turns ----------
+  const scripts = [{
+    agent: 'claude', name: 'notch-demo', model: 'Opus 5.5', prompt: 'add a glow to the notch while it works', length: 17,
+    events: [
+      { t: .6, type: 'think', say: 'Looking at how the notch is drawn first.' },
+      { t: 1.7, type: 'tool', kind: 'read', what: 'Read', detail: 'NotchView.swift' },
+      { t: 2.8, type: 'tool', kind: 'search', what: 'Grep', detail: 'GlowOutline' },
+      { t: 3.8, type: 'tool', kind: 'edit', what: 'Edit', detail: 'NotchView.swift', add: 34, rem: 4 },
+      { t: 5.4, type: 'tool', kind: 'shell', what: 'Bash', detail: 'swift build -c release', say: 'Building to check the new glow compiles.' },
+      { t: 8.0, type: 'tool', kind: 'shell', what: 'Bash', detail: 'rm -rf .build/cache', wait: 'Allow Bash: rm -rf .build/cache?' },
+      { t: 10.6, type: 'approve' },
+      { t: 11.4, type: 'tool', kind: 'edit', what: 'Write', detail: 'Sparkle.swift', add: 52 },
+      { t: 12.6, type: 'think', say: 'Done. The notch glows while I work and bursts when I finish.' },
+      { t: 13.4, type: 'done' },
+    ],
+  }, {
+    agent: 'codex', name: 'api-server', model: 'GPT-5.5 Codex', prompt: 'find out why the scheduler stalls', length: 11,
+    events: [
+      { t: .6, type: 'think', say: 'Checking why the scheduler stalls under load.' },
+      { t: 1.6, type: 'tool', kind: 'shell', what: 'Bash', detail: 'npm test -- --watch=false' },
+      { t: 4.2, type: 'tool', kind: 'edit', what: 'Patch', detail: 'scheduler.ts', add: 3, rem: 1 },
+      { t: 5.4, type: 'tool', kind: 'shell', what: 'exec', detail: 'git status --short' },
+      { t: 6.4, type: 'think', say: 'Fixed: the queue now wakes up after 250 ms.' },
+      { t: 7.2, type: 'done' },
+    ],
+  }];
+
+  // The whole state at time t, replayed from the script (so any moment can be rendered).
+  function stateAt(script, t) {
+    const s = { agent: script.agent, phase: 'idle', log: [], add: 0, rem: 0, start: null, end: null, say: null, wait: null, now: t };
+    const close = at => {
+      const run = s.log.find(a => a.running);
+      if (!run) return;
+      run.running = false;
+      run.dur = at - run.t;
+      s.add += run.add || 0;
+      s.rem += run.rem || 0;
+    };
+    for (const e of script.events) {
+      if (e.t > t) break;
+      if (e.type !== 'approve') close(e.t);
+      if (e.say) s.say = e.say;
+      if (e.type === 'think') { s.phase = 'thinking'; s.start ??= e.t; }
+      if (e.type === 'tool') {
+        s.start ??= e.t;
+        s.log.push({ ...e, running: true });
+        s.phase = e.wait ? 'waiting' : 'tool';
+        s.wait = e.wait || null;
+      }
+      if (e.type === 'approve') { s.phase = 'tool'; s.wait = null; }
+      if (e.type === 'done') { s.phase = 'done'; s.end = e.t; }
+    }
+    return s;
+  }
+
+  const accent = agent => agent === 'codex' ? 'var(--codex)' : 'var(--coral)';
+  function tintOf(s) {
+    if (s.phase === 'waiting') return 'var(--amber)';
+    if (s.phase === 'done') return 'var(--green)';
+    const run = s.log.find(a => a.running);
+    return run ? kinds[run.kind] : accent(s.agent);
+  }
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const clock = sec => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
+  const elapsed = s => s.start == null ? 0 : ((s.end ?? s.now) - s.start);
+
+  function leftEar(s) {
+    const run = s.log.find(a => a.running);
+    let label = '';
+    if (s.phase === 'thinking') label = `<span class="label"><span class="text">thinking…</span></span>`;
+    if (s.phase === 'tool' && run) label = `<span class="label">${icons[run.kind]}<span class="text">${run.detail}</span></span>`;
+    if (s.phase === 'waiting') label = `<span class="label">${icons.hand}<span class="text">${s.wait}</span></span>`;
+    if (s.phase === 'done') label = `<span class="label"><span class="text">done</span></span>`;
+    const glyph = s.phase === 'done'
+      ? `<span class="glyph" style="color:var(--green)">${icons.check}<span class="burst"></span></span>`
+      : `<span class="glyph">${glyphSVG(s.agent)}</span>`;
+    return `${glyph}<span class="timer">${clock(elapsed(s))}</span>${label}`;
+  }
+  function rightEar(s) {
+    const diff = s.add || s.rem ? `<span class="diff"><span class="add">+${s.add}</span><span class="rem">−${s.rem}</span></span>` : '';
+    return `${diff}<span class="meter" aria-hidden="true"><i style="--d:.42s"></i><i style="--d:.56s"></i><i style="--d:.36s"></i><i style="--d:.61s"></i></span>`;
+  }
+
+  function card(script, s) {
+    const run = s.log.find(a => a.running);
+    const status = {
+      idle: 'Idle', thinking: 'Thinking…', waiting: 'Waiting for you',
+      tool: run ? `${run.what === 'Bash' || run.what === 'exec' ? 'Running' : run.kind === 'edit' ? 'Editing' : run.kind === 'read' ? 'Reading' : 'Searching'} ${run.detail}` : 'Working…',
+      done: 'Done · just now',
+    }[s.phase];
+    const rows = s.log.slice(-4).map(a => `
+      <li class="${a.running ? 'running' : ''}">
+        <span style="color:${kinds[a.kind]}">${icons[a.kind]}</span>
+        <span class="what">${a.what}</span><span class="detail">${a.detail}</span>
+        <span class="end">${a.running
+          ? `${Math.max(1, Math.floor(s.now - a.t))}s <span class="spinner" style="color:${kinds[a.kind]}"></span>`
+          : (a.add || a.rem) ? `<span class="add">+${a.add || 0}</span><span class="rem">−${a.rem || 0}</span>` : `${a.dur.toFixed(1)}s`}</span>
+      </li>`).join('');
+    return `
+      <article class="card" style="--tint:${tintOf(s)}">
+        <div class="card-head">
+          <div class="tile" style="--tint:${accent(s.agent)}"><span class="glyph">${glyphSVG(s.agent)}</span><span class="dot" style="background:${tintOf(s)}"></span></div>
+          <div class="who"><div class="name">${script.name} <span class="badge">${script.model}</span></div><div class="status">${status}</div></div>
+          <div class="nums"><span class="timer">${clock(elapsed(s))}</span>${s.add || s.rem ? `<span class="diff" style="justify-content:flex-end"><span class="add">+${s.add}</span><span class="rem">−${s.rem}</span></span>` : ''}</div>
+        </div>
+        <p class="prompt">“${script.prompt}”</p>
+        ${rows ? `<ul class="log">${rows}</ul>` : ''}
+        ${s.say ? `<p class="say"><span class="glyph" style="color:${accent(s.agent)}">${glyphSVG(s.agent)}</span>${s.say}</p>` : ''}
+        <div class="stats"><span>${script.agent === 'codex' ? '109k / 258k' : '312k'} context</span><span>${plural(s.log.length, 'tool')}</span><span>${plural(new Set(s.log.filter(a => a.kind === 'edit').map(a => a.detail)).size, 'file')}</span></div>
+      </article>`;
+  }
+  function otherCard() {
+    return `
+      <article class="card" style="--tint:var(--green)">
+        <div class="card-head">
+          <div class="tile" style="--tint:var(--coral)"><span class="glyph">${glyphSVG('claude')}</span><span class="dot" style="background:var(--green)"></span></div>
+          <div class="who"><div class="name">weather-api <span class="badge">Sonnet 5</span></div><div class="status">Done · 2m ago</div></div>
+          <div class="nums"><span class="timer" style="color:var(--green)">3:08</span><span class="diff" style="justify-content:flex-end"><span class="add">+21</span><span class="rem">−6</span></span></div>
+        </div>
+      </article>`;
+  }
+  const today = `<div class="today"><b>TODAY</b><span>2h 14m</span><span>38 turns</span><span class="diff"><span class="add">+5,231</span><span class="rem">−812</span></span></div>`;
+
+  // ---------- an island (live or static) ----------
+  function buildIsland(el) {
+    el.innerHTML = `
+      <div class="shape">
+        <div class="panel"><div class="inner"><div class="content"></div></div></div>
+        <div class="ear left"><span class="shoulder l"></span><div class="clip"><div class="content"></div></div></div>
+        <div class="gap"></div>
+        <div class="ear right"><span class="shoulder r"></span><div class="clip"><div class="content"></div></div></div>
+      </div>`;
+    el.querySelector('.shoulder.l').style.left = '-9px';
+    el.querySelector('.shoulder.r').style.right = '-9px';
+    return {
+      el,
+      left: el.querySelector('.ear.left'), right: el.querySelector('.ear.right'),
+      leftC: el.querySelector('.ear.left .content'), rightC: el.querySelector('.ear.right .content'),
+      panel: el.querySelector('.panel .content'),
+    };
+  }
+  function sizeEars(ui, expanded) {
+    const cs = getComputedStyle(ui.el);
+    const notch = parseFloat(cs.getPropertyValue('--notch-w'));
+    if (expanded) {
+      const panelW = Math.min(580, window.innerWidth - 24);
+      const each = (panelW - notch) / 2;
+      ui.left.style.width = ui.right.style.width = `${each}px`;
+      return;
+    }
+    for (const [ear, content] of [[ui.left, ui.leftC], [ui.right, ui.rightC]]) {
+      const w = content.childElementCount ? content.scrollWidth + 14 : 0;
+      ear.style.width = `${w}px`;
+    }
+  }
+  function paint(ui, s, script, { expanded = false, keyChanged = true } = {}) {
+    const el = ui.el;
+    el.style.setProperty('--tint', tintOf(s));
+    for (const p of ['idle', 'thinking', 'tool', 'waiting', 'done']) el.classList.toggle(`st-${p}`, s.phase === p);
+    el.classList.toggle('open', s.phase !== 'idle' || expanded);
+    el.classList.toggle('lit', s.phase !== 'idle');
+    el.classList.toggle('expanded', expanded);
+    if (keyChanged) {
+      ui.leftC.innerHTML = s.phase === 'idle' && !expanded ? '' : s.phase === 'idle'
+        ? `<span class="glyph" style="color:var(--coral)">${glyphSVG('claude')}</span><span class="label"><span class="text">Claudebar</span></span>`
+        : leftEar(s);
+      ui.rightC.innerHTML = s.phase === 'idle' ? (expanded ? `<span class="diff"><span class="add">+5,231</span><span class="rem">−812</span></span>` : '') : rightEar(s);
+      ui.leftC.querySelector('.label')?.classList.add('swap');
+      if (ui.panel) ui.panel.innerHTML = (s.phase === 'idle' ? '' : card(script, s)) + otherCard() + today;
+      if (s.phase === 'done') burst(el);
+    } else {
+      const timer = ui.leftC.querySelector('.timer');
+      if (timer) timer.textContent = clock(elapsed(s));
+      ui.panel?.querySelectorAll('.card:first-child .nums .timer').forEach(t => t.textContent = clock(elapsed(s)));
+      ui.panel?.querySelectorAll('.log li.running .end').forEach(end => {
+        const run = s.log.find(a => a.running);
+        if (run) end.firstChild.textContent = `${Math.max(1, Math.floor(s.now - run.t))}s `;
+      });
+    }
+    sizeEars(ui, expanded);
+  }
+  function burst(el) {
+    const b = el.querySelector('.burst');
+    if (!b) return;
+    b.innerHTML = Array.from({ length: 10 }, (_, i) => {
+      const a = i / 10 * Math.PI * 2 + .3, d = i % 2 ? 15 : 21;
+      return `<i style="--x:${(Math.cos(a) * d).toFixed(1)}px;--y:${(Math.sin(a) * d).toFixed(1)}px"></i>`;
+    }).join('');
+  }
+  function jelly(el) {
+    el.classList.remove('jelly'); void el.offsetWidth; el.classList.add('jelly');
+  }
+
+  // ---------- live notch ----------
+  const params = new URLSearchParams(location.search);
+  const frozen = params.has('t');
+  // A frozen moment is for screenshots: show the heading at full width, not mid-animation.
+  if (frozen) document.querySelector('.hero h1').classList.remove('grow');
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const live = buildIsland(document.getElementById('live'));
+  const hint = document.createElement('div');
+  hint.className = 'hint-tag';
+  hint.textContent = '↑ it’s running. hover the notch';
+  live.el.appendChild(hint);
+
+  let expanded = params.has('expand');
+  let loop = params.get('agent') === 'codex' ? 1 : 0;
+  let loopStart = performance.now() - (frozen ? parseFloat(params.get('t')) * 1000 : 0);
+  let lastKey = '';
+
+  function tick() {
+    const script = scripts[loop % scripts.length];
+    let t = (performance.now() - loopStart) / 1000;
+    if (frozen) t = parseFloat(params.get('t'));
+    else if (reduced) t = script.events.at(-2).t + .1;
+    if (!frozen && !reduced && t > script.length) { loop++; loopStart = performance.now(); return tick(); }
+    const s = stateAt(script, t);
+    const key = `${loop}|${s.phase}|${s.log.length}|${s.log.filter(a => a.running).length}|${s.say}|${expanded}`;
+    const changed = key !== lastKey;
+    if (changed && lastKey && (s.phase === 'waiting' || s.phase === 'done') && !lastKey.includes(`|${s.phase}|`)) jelly(live.el);
+    paint(live, s, script, { expanded, keyChanged: changed });
+    lastKey = key;
+    hint.classList.toggle('show', !expanded && s.phase !== 'idle' && window.scrollY < 40 && !sessionStorage.getItem('hovered'));
+  }
+  tick();
+  if (!frozen) setInterval(tick, 250);
+
+  const setExpanded = v => { if (expanded !== v) { expanded = v; lastKey = ''; tick(); } };
+  live.el.addEventListener('mouseenter', () => { try { sessionStorage.setItem('hovered', '1'); } catch {} setExpanded(true); });
+  live.el.addEventListener('mouseleave', () => setExpanded(false));
+  live.el.addEventListener('focus', () => setExpanded(true));
+  live.el.addEventListener('blur', () => setExpanded(false));
+  live.el.addEventListener('keydown', e => { if (e.key === 'Escape') live.el.blur(); });
+  live.el.addEventListener('click', () => { if (matchMedia('(hover: none)').matches) setExpanded(!expanded); });
+  addEventListener('resize', () => sizeEars(live, expanded));
+  addEventListener('scroll', () => hint.classList.toggle('show', hint.classList.contains('show') && scrollY < 40), { passive: true });
+
+  // ---------- state reel ----------
+  const reel = document.getElementById('reel');
+  const frames = [
+    { script: 0, t: 1.0, text: '<b>Thinking.</b> The spark turns slowly and the turn timer starts.' },
+    { script: 0, t: 4.4, text: '<b>Working.</b> The tool and its target, glowing in the tool’s color, with the running line count.' },
+    { script: 0, t: 8.6, text: '<b>Needs you.</b> An amber pulse and a wobble when an agent asks permission or has a question.' },
+    { script: 0, t: 13.8, text: '<b>Done.</b> A green check, the final time and line count, and a chime on long turns.' },
+    { script: 1, t: 2.4, text: '<b>Codex.</b> Its own mark and colors, with the same live details.' },
+  ];
+  for (const f of frames) {
+    const shot = document.createElement('div');
+    shot.className = 'shot';
+    shot.innerHTML = `<div class="screen"><div class="island"></div></div><p>${f.text}</p>`;
+    reel.appendChild(shot);
+    const island = shot.querySelector('.island');
+    island.style.left = '50%';
+    const ui = buildIsland(island);
+    ui.panel = null;
+    const s = stateAt(scripts[f.script], f.t);
+    paint(ui, s, scripts[f.script]);
+    island.querySelector('.burst')?.replaceChildren();
+    requestAnimationFrame(() => sizeEars(ui, false));
+    document.fonts?.ready.then(() => sizeEars(ui, false));
+  }
+
+  // ---------- panel showcase: the island, expanded and pinned ----------
+  const stage = document.getElementById('showcase');
+  const pinned = buildIsland(stage.querySelector('.island'));
+  function layoutStage() {
+    const w = stage.clientWidth;
+    pinned.el.style.left = `${w / 2}px`;
+    pinned.el.style.setProperty('--panel-w', `${w}px`);
+    const notch = parseFloat(getComputedStyle(pinned.el).getPropertyValue('--notch-w'));
+    pinned.left.style.width = pinned.right.style.width = `${(w - notch) / 2}px`;
+    pinned.el.querySelector('.panel').style.left = `${-w / 2}px`;
+    stage.style.height = `${pinned.el.querySelector('.panel').offsetHeight + parseFloat(getComputedStyle(pinned.el).getPropertyValue('--bar-h'))}px`;
+  }
+  const showState = stateAt(scripts[0], 6.2);
+  paint(pinned, showState, scripts[0], { expanded: true });
+  pinned.panel.innerHTML = card(scripts[0], showState) + card(scripts[1], stateAt(scripts[1], 2.2)) + today;
+  layoutStage();
+  addEventListener('resize', layoutStage);
+  document.fonts?.ready.then(layoutStage);
+
+  document.fonts?.ready.then(() => sizeEars(live, expanded));
+
+  // ---------- menu bar bits ----------
+  const now = document.querySelector('.clock-now');
+  const showTime = () => now.textContent = new Date().toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  showTime(); setInterval(showTime, 15000);
+
+  const root = document.documentElement;
+  const buttons = document.querySelectorAll('.finish button');
+  const systemDark = matchMedia('(prefers-color-scheme: dark)');
+  function applyFinish(f) {
+    if (f) root.dataset.finish = f; else delete root.dataset.finish;
+    const effective = f || (systemDark.matches ? 'space' : 'silver');
+    buttons.forEach(b => b.setAttribute('aria-pressed', String(b.dataset.finish === effective)));
+  }
+  let saved = params.get('finish');
+  try { saved ??= localStorage.getItem('finish'); } catch {}
+  applyFinish(saved);
+  systemDark.addEventListener('change', () => applyFinish(root.dataset.finish));
+  buttons.forEach(b => b.addEventListener('click', () => {
+    try { localStorage.setItem('finish', b.dataset.finish); } catch {}
+    applyFinish(b.dataset.finish);
+  }));
+
+  document.querySelectorAll('[data-copy]').forEach(btn => btn.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(btn.dataset.copy); btn.textContent = 'Copied'; }
+    catch { btn.textContent = 'Select and copy'; }
+    setTimeout(() => btn.textContent = 'Copy', 1600);
+  }));
+})();
+</script>
+</body>
+</html>
