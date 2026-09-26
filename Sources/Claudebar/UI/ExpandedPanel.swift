@@ -186,7 +186,7 @@ private struct StatusLine: View {
                         Image(systemName: tool.kind.symbol)
                             .font(.system(size: 9.5, weight: .bold))
                             .foregroundStyle(tool.kind.color)
-                        Text(tool.kind.verb).foregroundStyle(Palette.dim)
+                        Text(tool.reviewing ? "Auto-reviewing" : tool.kind.verb).foregroundStyle(Palette.dim)
                         Text(tool.headline)
                             .font(.system(size: 11, design: tool.isCode ? .monospaced : .default))
                             .foregroundStyle(Palette.text.opacity(0.75))
@@ -288,7 +288,14 @@ private struct ActivityRow: View {
     }
 
     @ViewBuilder private var trailing: some View {
-        if activity.isRunning {
+        if activity.isRunning && activity.reviewing {
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.shield")
+                Text("reviewing")
+            }
+            .font(.system(size: 10.5, weight: .semibold))
+            .foregroundStyle(Palette.amber.opacity(0.75))
+        } else if activity.isRunning {
             HStack(spacing: 5) {
                 LiveElapsed(since: activity.startedAt)
                     .font(.system(size: 10.5, design: .monospaced))

@@ -7,6 +7,7 @@ import Network
 ///   GET  /state   JSON snapshot of what Claudebar currently knows, for debugging
 ///   POST /demo    play the built-in demo sequence
 ///   POST /peek    pop the expanded panel open for a few seconds
+///   GET  /events  the last 300 raw hook payloads, oldest first, for debugging
 ///   GET  /health  liveness probe
 final class EventServer: @unchecked Sendable {
     static var configuredPort: UInt16 {
@@ -20,6 +21,8 @@ final class EventServer: @unchecked Sendable {
     var onPeekRequest: (@MainActor () -> Void)?
 
     private let queue = DispatchQueue(label: "claudebar.event-server")
+    /// Raw payloads as received (touched only on `queue`).
+    private var recentBodies: [Data] = []
     private var listener: NWListener?
     private static let maxRequestBytes = 64 << 20
 
@@ -74,6 +77,8 @@ final class EventServer: @unchecked Sendable {
             // while the hook's process tree is guaranteed to still be alive.
             let envelope = HookEnvelope(body: request.body, headers: request.headers)
             send(on: connection, status: "204 No Content")
+            recentBodies.append(Self.tagged(request.body, agent: envelope?.agent))
+            if recentBodies.count > 300 { recentBodies.removeFirst(recentBodies.count - 300) }
             if let envelope {
                 onMain { $0.onEvent?(envelope) }
             }
@@ -90,11 +95,27 @@ final class EventServer: @unchecked Sendable {
         case ("GET", "/peek"), ("POST", "/peek"):
             send(on: connection, status: "202 Accepted")
             onMain { $0.onPeekRequest?() }
+        case ("GET", "/events"):
+            var body = Data("[".utf8)
+            for (index, event) in recentBodies.enumerated() {
+                if index > 0 { body.append(Data(",".utf8)) }
+                body.append(event)
+            }
+            body.append(Data("]".utf8))
+            send(on: connection, status: "200 OK", body: body, contentType: "application/json")
         case ("GET", "/health"):
             send(on: connection, status: "200 OK", body: Data("ok\n".utf8), contentType: "text/plain")
         default:
             send(on: connection, status: "404 Not Found")
         }
+    }
+
+    /// The payload with `received_at` and `agent` added, so /events reads as a timeline.
+    private static func tagged(_ body: Data, agent: Agent?) -> Data {
+        guard var object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return body }
+        object["received_at"] = ISO8601DateFormatter().string(from: Date())
+        object["agent"] = agent?.rawValue
+        return (try? JSONSerialization.data(withJSONObject: object)) ?? body
     }
 
     private func onMain(_ work: @escaping @MainActor (EventServer) -> Void) {

@@ -281,12 +281,28 @@ final class Session: Identifiable {
 
     /// Links a permission prompt to the running tool it's about, so an unrelated
     /// parallel tool finishing doesn't clear it.
-    func setWaiting(_ detail: String, tool: String?, agentID: String?, at date: Date) {
+    /// Links a prompt to the tool it's about: by ID when the hook sends one (Codex), else by
+    /// the exact command/target, else the latest running call of that tool. Parallel calls are
+    /// common, so "the latest Bash" alone can pick a long-running one and strand the prompt.
+    func setWaiting(_ detail: String, toolUseID: String? = nil, tool: String?, target: String? = nil,
+                    agentID: String?, at date: Date) {
         waitingDetail = detail
-        waitingToolID = tool.flatMap { name in
-            activities.last { $0.isRunning && $0.tool == name && $0.agentID == agentID }?.id
-        }
+        waitingToolID = runningTool(id: toolUseID, tool: tool, target: target, agentID: agentID)?.id
         setPhase(.waiting, at: date)
+    }
+
+    /// Codex's own reviewer is deciding on this call: show it, but don't ask for attention.
+    func markReviewing(toolUseID: String?, tool: String, target: String, agentID: String?) {
+        guard let match = runningTool(id: toolUseID, tool: tool, target: target, agentID: agentID),
+              let index = activities.lastIndex(where: { $0.id == match.id }) else { return }
+        activities[index].reviewing = true
+    }
+
+    private func runningTool(id: String?, tool: String?, target: String?, agentID: String?) -> ToolActivity? {
+        if let id, let exact = activities.last(where: { $0.id == id && $0.isRunning }) { return exact }
+        guard let tool else { return nil }
+        let candidates = activities.filter { $0.isRunning && $0.tool == tool && $0.agentID == agentID }
+        return candidates.last { target != nil && $0.detail == target } ?? candidates.last
     }
 
     func clearWaiting(at date: Date) {

@@ -98,6 +98,11 @@ final class SessionStore {
             // Async hooks can occasionally land out of order; a Post already seen wins.
             guard !session.hasFinished(toolID: id) else { break }
             session.ensureTurn(at: now)
+            // Claude can't start another tool while a permission prompt is open, so one starting
+            // means the prompt was answered even if we missed which tool it was for.
+            if session.agent == .claude, session.phase == .waiting, now.timeIntervalSince(session.phaseSince) > 0.5 {
+                session.clearWaiting(at: now)
+            }
             session.startTool(ToolActivity(id: id, tool: tool, input: env.dict("tool_input"), agentID: agent, at: now))
             if tool == "AskUserQuestion" || tool == "ExitPlanMode" || tool.hasPrefix("request_user_input") {
                 session.setWaiting(tool == "ExitPlanMode" ? "Plan ready for review" : "\(session.agent.name) has a question",
@@ -128,9 +133,13 @@ final class SessionStore {
         case "PermissionRequest":
             let tool = env.string("tool_name") ?? "tool"
             let (label, detail) = ToolDescriber.describe(tool: tool, input: env.dict("tool_input"))
-            session.setWaiting(detail.isEmpty ? "Allow \(label)?" : "Allow \(label): \(detail)",
-                               tool: tool, agentID: agent, at: now)
-            attention(for: session)
+            if session.agent == .codex, CodexConfig.autoReviewsApprovals {
+                session.markReviewing(toolUseID: env.string("tool_use_id"), tool: tool, target: detail, agentID: agent)
+            } else {
+                session.setWaiting(detail.isEmpty ? "Allow \(label)?" : "Allow \(label): \(detail)",
+                                   toolUseID: env.string("tool_use_id"), tool: tool, target: detail, agentID: agent, at: now)
+                attention(for: session)
+            }
 
         case "PermissionDenied", "ElicitationResult":
             session.clearWaiting(at: now)
@@ -394,7 +403,7 @@ final class SessionStore {
             bar.mode = .working
             if let tool = session.currentTool ?? session.recentTool(within: 1.2, now: now) {
                 bar.tint = tool.kind.color
-                bar.symbol = tool.kind.symbol
+                bar.symbol = tool.isRunning && tool.reviewing ? "checkmark.shield" : tool.kind.symbol
                 bar.detail = Fmt.truncate(tool.headline, 26, middle: tool.isFile)
             } else {
                 bar.tint = session.agent.accent

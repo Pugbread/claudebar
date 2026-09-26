@@ -81,6 +81,8 @@ struct ToolActivity: Identifiable, Equatable {
     var failed = false
     var delta = LineDelta()
     var durationMs: Int?
+    /// Codex's reviewer is deciding whether this may run; nothing for you to do.
+    var reviewing = false
 
     var isRunning: Bool { endedAt == nil }
     var isCode: Bool { kind == .shell || kind == .search }

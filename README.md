@@ -50,6 +50,10 @@ Requires macOS 15 or later, the Xcode command line tools (`xcode-select --instal
 **Codex needs one extra step:** it only runs hooks you've reviewed. Open Codex, run `/hooks`,
 and trust the Claudebar ones.
 
+If Codex reviews approvals itself (`approvals_reviewer = "guardian_subagent"` in
+`~/.codex/config.toml`), its permission requests show as *reviewing* on the command instead of
+an amber "needs you", since Codex decides them without asking you.
+
 `./scripts/uninstall.sh` removes the hooks, the hook script and the app.
 
 ## Using it
@@ -106,6 +110,7 @@ displays things. It never answers a permission prompt.
 
 ```bash
 curl -s localhost:47823/state | jq    # what Claudebar knows right now
+curl -s localhost:47823/events | jq   # the last 300 raw hook events it received
 curl -X POST localhost:47823/demo     # play the demo sequence
 curl -X POST localhost:47823/peek     # pop the panel open for 8 seconds
 ```
