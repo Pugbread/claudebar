@@ -40,19 +40,71 @@ struct FrameClock<Content: View>: View {
 
 // MARK: - Notch shape
 
+/// Everything that decides the island's outline, animated as one value. The island is drawn
+/// (and its content clipped) from these numbers directly instead of from layout, so opening
+/// and closing never re-lays out what's inside: the content sits at its final size and the
+/// shape grows to reveal it.
+struct IslandMetrics: VectorArithmetic, Equatable {
+    var width: CGFloat = 0
+    var height: CGFloat = 0
+    var topRadius: CGFloat = 0
+    var bottomRadius: CGFloat = 0
+    /// How far each side is pulled in from the symmetric width (short ear, tucked ear).
+    var leadingTrim: CGFloat = 0
+    var trailingTrim: CGFloat = 0
+
+    /// The island within a container: centred horizontally, hanging from the top edge.
+    func rect(in container: CGRect) -> CGRect {
+        CGRect(x: container.midX - width / 2 + leadingTrim, y: container.minY,
+               width: max(0, width - leadingTrim - trailingTrim), height: max(0, height))
+    }
+
+    static var zero: IslandMetrics { IslandMetrics() }
+
+    static func + (lhs: IslandMetrics, rhs: IslandMetrics) -> IslandMetrics {
+        IslandMetrics(width: lhs.width + rhs.width, height: lhs.height + rhs.height,
+                      topRadius: lhs.topRadius + rhs.topRadius, bottomRadius: lhs.bottomRadius + rhs.bottomRadius,
+                      leadingTrim: lhs.leadingTrim + rhs.leadingTrim, trailingTrim: lhs.trailingTrim + rhs.trailingTrim)
+    }
+
+    static func - (lhs: IslandMetrics, rhs: IslandMetrics) -> IslandMetrics {
+        lhs + rhs.scaled(-1)
+    }
+
+    mutating func scale(by rhs: Double) {
+        let factor = CGFloat(rhs)
+        width *= factor
+        height *= factor
+        topRadius *= factor
+        bottomRadius *= factor
+        leadingTrim *= factor
+        trailingTrim *= factor
+    }
+
+    private func scaled(_ factor: Double) -> IslandMetrics {
+        var copy = self
+        copy.scale(by: factor)
+        return copy
+    }
+
+    var magnitudeSquared: Double {
+        Double(width * width + height * height + topRadius * topRadius + bottomRadius * bottomRadius
+               + leadingTrim * leadingTrim + trailingTrim * trailingTrim)
+    }
+}
+
 /// The island: flat top that melts into the screen edge through concave "shoulders",
 /// rounded bottom corners.
-struct NotchShape: Shape {
-    var topRadius: CGFloat
-    var bottomRadius: CGFloat
+struct IslandShape: Shape {
+    var metrics: IslandMetrics
 
-    var animatableData: AnimatablePair<CGFloat, CGFloat> {
-        get { AnimatablePair(topRadius, bottomRadius) }
-        set { (topRadius, bottomRadius) = (newValue.first, newValue.second) }
+    var animatableData: IslandMetrics {
+        get { metrics }
+        set { metrics = newValue }
     }
 
     func path(in rect: CGRect) -> Path {
-        NotchPath.make(in: rect, top: topRadius, bottom: bottomRadius, closed: true)
+        NotchPath.make(in: metrics.rect(in: rect), top: metrics.topRadius, bottom: metrics.bottomRadius, closed: true)
     }
 }
 
@@ -149,41 +201,6 @@ struct CountBadge: View {
     }
 }
 
-struct Spinner: View {
-    let color: Color
-
-    var body: some View {
-        FrameClock(active: true) { date in
-            let degrees = (date.timeIntervalSinceReferenceDate * 400).truncatingRemainder(dividingBy: 360)
-            Circle()
-                .trim(from: 0.12, to: 0.78)
-                .stroke(color, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
-                .rotationEffect(.degrees(degrees))
-        }
-        .frame(width: 10, height: 10)
-    }
-}
-
-struct StatusDot: View {
-    let color: Color
-    let pulsing: Bool
-
-    var body: some View {
-        FrameClock(active: pulsing) { date in
-            let progress = pulsing ? date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.4) / 1.4 : 1
-            ZStack {
-                Circle()
-                    .stroke(color.opacity(0.8 * (1 - progress)), lineWidth: 1.5)
-                    .frame(width: 8, height: 8)
-                    .scaleEffect(1 + progress * 1.3)
-                Circle().fill(Color.black).frame(width: 12, height: 12)
-                Circle().fill(color).frame(width: 8, height: 8)
-            }
-        }
-        .frame(width: 12, height: 12)
-    }
-}
-
 struct LiveElapsed: View {
     let since: Date
 
@@ -260,33 +277,6 @@ struct HostIcon: View {
 
 // MARK: - Effects
 
-struct Shimmer: ViewModifier {
-    let base: Color
-    let highlight: Color
-
-    func body(content: Content) -> some View {
-        FrameClock(active: true) { date in
-            let cycle = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.8) / 1.8
-            let phase = cycle * 1.6 - 0.3
-            content.foregroundStyle(
-                LinearGradient(
-                    stops: [
-                        .init(color: base, location: 0),
-                        .init(color: base, location: clamp(phase - 0.2)),
-                        .init(color: highlight, location: clamp(phase)),
-                        .init(color: base, location: clamp(phase + 0.2)),
-                        .init(color: base, location: 1),
-                    ],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-            )
-        }
-    }
-
-    private func clamp(_ value: Double) -> Double { min(1, max(0, value)) }
-}
-
 private struct JellyValues {
     var scaleX: CGFloat = 1
     var scaleY: CGFloat = 1
@@ -314,10 +304,6 @@ extension AnyTransition {
 }
 
 extension View {
-    func shimmer(base: Color, highlight: Color = .white) -> some View {
-        modifier(Shimmer(base: base, highlight: highlight))
-    }
-
     /// A squash-and-stretch hanging from the top edge, for "hey, look at me" moments.
     func jelly(trigger: Int) -> some View {
         keyframeAnimator(initialValue: JellyValues(), trigger: trigger) { content, value in

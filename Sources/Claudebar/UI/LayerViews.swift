@@ -18,6 +18,9 @@ class LayerHostingView: NSView {
         wantsLayer = true
         root.masksToBounds = false
         root.isGeometryFlipped = true
+        // AppKit resizes a hosted layer without wrapping it in a no-animation transaction;
+        // left to its implicit 0.25s animation, the layer would trail behind its view.
+        root.actions = ["bounds": NSNull(), "position": NSNull(), "frame": NSNull()]
     }
 
     @available(*, unavailable)
@@ -199,10 +202,25 @@ final class SparkLayerView: LayerHostingView {
 // MARK: - Glow
 
 /// A conic gradient spinning around the island's edge, plus a soft copy for bloom.
-struct GlowOutline: NSViewRepresentable {
+/// Follows the island's outline frame by frame: as an Animatable view it receives every
+/// interpolated step of the island's geometry, not just the end value.
+struct GlowOutline: View, Animatable {
     let bar: BarPresentation
-    let topRadius: CGFloat
-    let bottomRadius: CGFloat
+    var metrics: IslandMetrics
+
+    var animatableData: IslandMetrics {
+        get { metrics }
+        set { metrics = newValue }
+    }
+
+    var body: some View {
+        GlowLayer(bar: bar, metrics: metrics)
+    }
+}
+
+private struct GlowLayer: NSViewRepresentable {
+    let bar: BarPresentation
+    let metrics: IslandMetrics
 
     func makeNSView(context: Context) -> GlowLayerView {
         GlowLayerView(frame: .zero)
@@ -210,8 +228,7 @@ struct GlowOutline: NSViewRepresentable {
 
     func updateNSView(_ view: GlowLayerView, context: Context) {
         let colors = (bar.glow + [bar.glow.first ?? Palette.slate]).map { NSColor($0).cgColor }
-        view.configure(colors: colors, mode: bar.mode, since: bar.modeSince,
-                       topRadius: topRadius, bottomRadius: bottomRadius,
+        view.configure(colors: colors, mode: bar.mode, since: bar.modeSince, metrics: metrics,
                        animated: context.environment.motionEnabled)
     }
 }
@@ -220,7 +237,7 @@ final class GlowLayerView: LayerHostingView {
     private let strength = CALayer()
     private let bloom = GradientRing(lineWidth: 6, softness: 7)
     private let rim = GradientRing(lineWidth: 1.4, softness: 0)
-    private var radii: (top: CGFloat, bottom: CGFloat) = (0, 0)
+    private var metrics = IslandMetrics.zero
     private var currentKey: String?
 
     override init(frame frameRect: NSRect) {
@@ -237,19 +254,20 @@ final class GlowLayerView: LayerHostingView {
     }
 
     private func updateGeometry() {
-        let path = NotchPath.make(in: bounds, top: radii.top, bottom: radii.bottom, closed: false).cgPath
+        let island = metrics.rect(in: bounds)
+        let path = NotchPath.make(in: island, top: metrics.topRadius, bottom: metrics.bottomRadius, closed: false).cgPath
         withoutActions {
             strength.frame = bounds
-            bloom.update(bounds: bounds, path: path)
-            rim.update(bounds: bounds, path: path)
+            bloom.update(bounds: bounds, island: island, path: path)
+            rim.update(bounds: bounds, island: island, path: path)
         }
     }
 
-    func configure(colors: [CGColor], mode: BarMode, since: Date, topRadius: CGFloat, bottomRadius: CGFloat, animated: Bool) {
+    func configure(colors: [CGColor], mode: BarMode, since: Date, metrics: IslandMetrics, animated: Bool) {
         bloom.gradient.colors = colors
         rim.gradient.colors = colors
-        if radii != (topRadius, bottomRadius) {
-            radii = (topRadius, bottomRadius)
+        if self.metrics != metrics {
+            self.metrics = metrics
             updateGeometry()
         }
 
@@ -338,13 +356,13 @@ private final class GradientRing {
         holder.addSublayer(gradient)
     }
 
-    func update(bounds: CGRect, path: CGPath) {
+    func update(bounds: CGRect, island: CGRect, path: CGPath) {
         holder.frame = bounds
         mask.frame = bounds
         mask.path = path
-        let side = hypot(bounds.width, bounds.height)
+        let side = hypot(island.width, island.height)
         gradient.bounds = CGRect(x: 0, y: 0, width: side, height: side)
-        gradient.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        gradient.position = CGPoint(x: island.midX, y: island.midY)
     }
 }
 
@@ -433,5 +451,230 @@ final class MeterLayerView: LayerHostingView {
                 break
             }
         }
+    }
+}
+
+// MARK: - Spinner
+
+/// A small arc turning in place, for a running tool.
+struct Spinner: NSViewRepresentable {
+    let color: Color
+
+    func makeNSView(context: Context) -> SpinnerLayerView {
+        SpinnerLayerView(frame: .zero)
+    }
+
+    func updateNSView(_ view: SpinnerLayerView, context: Context) {
+        view.configure(color: NSColor(color), animated: context.environment.motionEnabled)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: SpinnerLayerView, context: Context) -> CGSize? {
+        CGSize(width: 10, height: 10)
+    }
+}
+
+final class SpinnerLayerView: LayerHostingView {
+    private let arc = CAShapeLayer()
+    private var animated: Bool?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        arc.fillColor = nil
+        arc.lineWidth = 1.6
+        arc.lineCap = .round
+        arc.strokeStart = 0.12
+        arc.strokeEnd = 0.78
+        root.addSublayer(arc)
+    }
+
+    override func layout() {
+        super.layout()
+        withoutActions {
+            arc.frame = bounds
+            arc.path = CGPath(ellipseIn: bounds.insetBy(dx: 0.8, dy: 0.8), transform: nil)
+        }
+    }
+
+    func configure(color: NSColor, animated: Bool) {
+        arc.strokeColor = color.cgColor
+        guard self.animated != animated else { return }
+        self.animated = animated
+        arc.removeAllAnimations()
+        if animated { arc.add(CABasicAnimation.spin(duration: 0.9), forKey: "spin") }
+    }
+}
+
+// MARK: - Status dot
+
+/// A session's status colour, with a ring pulsing out of it while the session works.
+struct StatusDot: NSViewRepresentable {
+    let color: Color
+    let pulsing: Bool
+
+    func makeNSView(context: Context) -> StatusDotLayerView {
+        StatusDotLayerView(frame: .zero)
+    }
+
+    func updateNSView(_ view: StatusDotLayerView, context: Context) {
+        view.configure(color: NSColor(color), pulsing: pulsing && context.environment.motionEnabled)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: StatusDotLayerView, context: Context) -> CGSize? {
+        CGSize(width: 12, height: 12)
+    }
+}
+
+final class StatusDotLayerView: LayerHostingView {
+    private let ring = CAShapeLayer()
+    private let rim = CALayer()
+    private let dot = CALayer()
+    private var pulsing: Bool?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        ring.fillColor = nil
+        ring.lineWidth = 1.5
+        ring.opacity = 0
+        rim.backgroundColor = NSColor.black.cgColor
+        root.addSublayer(ring)
+        root.addSublayer(rim)
+        root.addSublayer(dot)
+    }
+
+    override func layout() {
+        super.layout()
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        withoutActions {
+            ring.bounds = CGRect(x: 0, y: 0, width: 8, height: 8)
+            ring.position = center
+            ring.path = CGPath(ellipseIn: ring.bounds, transform: nil)
+            rim.bounds = CGRect(x: 0, y: 0, width: 12, height: 12)
+            rim.cornerRadius = 6
+            rim.position = center
+            dot.bounds = CGRect(x: 0, y: 0, width: 8, height: 8)
+            dot.cornerRadius = 4
+            dot.position = center
+        }
+    }
+
+    func configure(color: NSColor, pulsing: Bool) {
+        ring.strokeColor = color.cgColor
+        dot.backgroundColor = color.cgColor
+        guard self.pulsing != pulsing else { return }
+        self.pulsing = pulsing
+        ring.removeAllAnimations()
+        guard pulsing else { return }
+        let grow = CABasicAnimation(keyPath: "transform.scale")
+        grow.fromValue = 1
+        grow.toValue = 2.3
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.8
+        fade.toValue = 0
+        let pulse = CAAnimationGroup()
+        pulse.animations = [grow, fade]
+        pulse.duration = 1.4
+        pulse.repeatCount = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        pulse.isRemovedOnCompletion = false
+        ring.add(pulse, forKey: "pulse")
+    }
+}
+
+// MARK: - Shimmer text
+
+/// Text with a highlight sweeping across it. Done in Core Animation (a gradient moving behind a
+/// text-shaped mask) because animating text in SwiftUI redraws its glyphs on the CPU every frame.
+struct ShimmerText: NSViewRepresentable {
+    let text: String
+    let base: Color
+    var highlight: Color = .white
+    var font: NSFont = .systemFont(ofSize: 11.5, weight: .medium)
+
+    func makeNSView(context: Context) -> ShimmerTextView {
+        ShimmerTextView(frame: .zero)
+    }
+
+    func updateNSView(_ view: ShimmerTextView, context: Context) {
+        view.configure(text: text, font: font, base: NSColor(base), highlight: NSColor(highlight),
+                       animated: context.environment.motionEnabled)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: ShimmerTextView, context: Context) -> CGSize? {
+        ShimmerTextView.size(of: text, font: font)
+    }
+}
+
+final class ShimmerTextView: NSView {
+    private let container = CALayer()
+    private let fill = CALayer()
+    private let band = CAGradientLayer()
+    private let glyphs = CATextLayer()
+    private var current: (text: String, animated: Bool)?
+
+    static func size(of text: String, font: NSFont) -> CGSize {
+        let size = (text as NSString).size(withAttributes: [.font: font])
+        return CGSize(width: ceil(size.width), height: ceil(size.height))
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        band.startPoint = CGPoint(x: 0, y: 0.5)
+        band.endPoint = CGPoint(x: 1, y: 0.5)
+        glyphs.foregroundColor = NSColor.black.cgColor
+        container.addSublayer(fill)
+        container.addSublayer(band)
+        container.mask = glyphs
+        layer?.addSublayer(container)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        glyphs.contentsScale = window?.backingScaleFactor ?? 2
+    }
+
+    override func layout() {
+        super.layout()
+        withoutActions {
+            container.frame = bounds
+            fill.frame = bounds
+            glyphs.frame = bounds
+            band.bounds = CGRect(x: 0, y: 0, width: max(28, bounds.width * 0.45), height: bounds.height)
+            band.position = CGPoint(x: -band.bounds.width / 2, y: bounds.midY)
+        }
+        if current?.animated == true { restartSweep() }
+    }
+
+    func configure(text: String, font: NSFont, base: NSColor, highlight: NSColor, animated: Bool) {
+        withoutActions {
+            fill.backgroundColor = base.cgColor
+            band.colors = [highlight.withAlphaComponent(0).cgColor, highlight.withAlphaComponent(0.85).cgColor,
+                           highlight.withAlphaComponent(0).cgColor]
+            glyphs.string = text
+            glyphs.font = font
+            glyphs.fontSize = font.pointSize
+            glyphs.contentsScale = window?.backingScaleFactor ?? 2
+        }
+        guard current?.text != text || current?.animated != animated else { return }
+        current = (text, animated)
+        band.removeAllAnimations()
+        if animated { restartSweep() }
+    }
+
+    private func restartSweep() {
+        let sweep = CABasicAnimation(keyPath: "position.x")
+        sweep.fromValue = -band.bounds.width / 2
+        sweep.toValue = bounds.width + band.bounds.width / 2
+        sweep.duration = 1.6
+        sweep.repeatCount = .infinity
+        sweep.isRemovedOnCompletion = false
+        band.add(sweep, forKey: "sweep")
     }
 }

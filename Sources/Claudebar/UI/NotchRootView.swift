@@ -4,6 +4,10 @@ enum NotchMetrics {
     static let expandedWidth: CGFloat = 600
     /// Collapsed island: its shoulder radius plus the padding between the shape's edge and the content.
     static let collapsedInset: CGFloat = 18
+    /// Expanded island: shoulder radius plus padding, each side of the panel.
+    static let expandedInset: CGFloat = 28
+    static let panelWidth: CGFloat = expandedWidth - 2 * expandedInset
+    static let panelBottomPadding: CGFloat = 14
 
     /// The gap the ears sit either side of while the island is out.
     static func openGap(_ geometry: NotchGeometry) -> CGFloat {
@@ -16,11 +20,22 @@ enum NotchMetrics {
     }
 }
 
+extension Motion {
+    /// Opening: a quick spring with a hint of overshoot, like the island breathing out.
+    static let open = Animation.spring(response: 0.44, dampingFraction: 0.78)
+    /// Closing: faster and without bounce, so it gets out of the way.
+    static let close = Animation.spring(response: 0.32, dampingFraction: 0.95)
+    /// The open panel changing height (a card appearing, the shelf filling).
+    static let resize = Animation.spring(response: 0.4, dampingFraction: 0.88)
+}
+
 struct NotchRootView: View {
     let model: NotchViewModel
     let store: SessionStore
     @State private var leadingWidth: CGFloat = 0
     @State private var trailingWidth: CGFloat = 0
+    /// The panel's height, kept between opens so the island heads for the right size at once.
+    @State private var panelHeight: CGFloat = 0
 
     var body: some View {
         let bar = store.presentation
@@ -41,75 +56,80 @@ struct NotchRootView: View {
             ? (open ? NotchMetrics.openGap(geometry) : max(0, geometry.notchWidth - 8 - 2 * inset))
             : (open ? NotchMetrics.openGap(geometry) : 0)
         let rowHeight = open ? geometry.notchHeight : geometry.notchHeight - 2
-        let contentWidth = NotchMetrics.expandedWidth - 2 * inset
 
-        // The ears layout is symmetric so the gap stays on the notch, but the black
-        // shape only covers each ear's actual content: the short side stays short and
-        // leaves the menu bar underneath it alone. A tucked side goes further: its edge
-        // slides in past the padding until it's just inside the hardware notch.
+        // Collapsed, the island only covers each ear's actual content: the short side stays
+        // short and leaves the menu bar underneath it alone. A tucked side goes further: its
+        // edge slides in past the padding until it's just inside the hardware notch.
         let leftShown = tuckLeft ? 0 : leadingWidth
         let rightShown = tuckRight ? 0 : trailingWidth
         let ear = max(leftShown, rightShown)
         let tuckDepth = inset + (gap - (geometry.hasNotch ? geometry.notchWidth : 0)) / 2 + 4
-        let trim = EdgeInsets(top: 0,
-                              leading: expanded ? 0 : ear - leftShown + (tuckLeft ? tuckDepth : 0),
-                              bottom: 0,
-                              trailing: expanded ? 0 : ear - rightShown + (tuckRight ? tuckDepth : 0))
+        let metrics = expanded
+            ? IslandMetrics(width: NotchMetrics.expandedWidth,
+                            height: rowHeight + panelHeight + NotchMetrics.panelBottomPadding,
+                            topRadius: topRadius, bottomRadius: bottomRadius)
+            : IslandMetrics(width: gap + 2 * ear + 2 * inset, height: rowHeight,
+                            topRadius: topRadius, bottomRadius: bottomRadius,
+                            leadingTrim: ear - leftShown + (tuckLeft ? tuckDepth : 0),
+                            trailingTrim: ear - rightShown + (tuckRight ? tuckDepth : 0))
 
-        VStack(spacing: 0) {
-            EarsLayout(gap: gap) {
-                // Measured before the tuck frame, so these stay the ears' natural widths.
-                LeadingEar(bar: bar, expanded: expanded)
-                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
-                        model.leftEarWidth = width
-                        withAnimation(.spring(response: 0.5, dampingFraction: 0.76)) { leadingWidth = width }
-                    }
-                    // Tucking collapses the ear toward the notch; the content rides along into it.
-                    .frame(width: tuckLeft ? 0 : nil, alignment: .leading)
-                    .clipShape(NotchSideClip(notchOnTrailingEdge: true))
-                TrailingEar(bar: bar, store: store, expanded: expanded)
-                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
-                        model.rightEarWidth = width
-                        withAnimation(.spring(response: 0.5, dampingFraction: 0.76)) { trailingWidth = width }
-                    }
-                    .frame(width: tuckRight ? 0 : nil, alignment: .trailing)
-                    .clipShape(NotchSideClip(notchOnTrailingEdge: false))
-            }
-            .frame(height: rowHeight)
-            .fixedSize(horizontal: !expanded, vertical: false)
-            .frame(width: expanded ? contentWidth : nil)
+        ZStack(alignment: .top) {
+            IslandShape(metrics: metrics).fill(Color.black)
 
-            if expanded {
-                ExpandedPanel(store: store)
-                    .frame(width: contentWidth)
-                    .padding(.bottom, 14)
-                    .transition(.blurFade)
-            }
-        }
-        .padding(.horizontal, inset)
-        .background {
-            NotchShape(topRadius: topRadius, bottomRadius: bottomRadius)
-                .fill(Color.black)
-                .padding(trim)
-                .onGeometryChange(for: CGRect.self) { proxy in
-                    proxy.frame(in: .global)
-                } action: { frame in
-                    model.shapeFrame = frame
+            // The content is laid out at its final size straight away and never moves while
+            // the island animates; the island's outline clips it, so growing reveals it.
+            ZStack(alignment: .top) {
+                EarsLayout(gap: gap) {
+                    // Measured before the tuck frame, so these stay the ears' natural widths.
+                    LeadingEar(bar: bar, expanded: expanded)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                            model.leftEarWidth = width
+                            withAnimation(.spring(response: 0.5, dampingFraction: 0.76)) { leadingWidth = width }
+                        }
+                        // Tucking collapses the ear toward the notch; the content rides along into it.
+                        .frame(width: tuckLeft ? 0 : nil, alignment: .leading)
+                        .clipShape(NotchSideClip(notchOnTrailingEdge: true))
+                    TrailingEar(bar: bar, store: store, expanded: expanded)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                            model.rightEarWidth = width
+                            withAnimation(.spring(response: 0.5, dampingFraction: 0.76)) { trailingWidth = width }
+                        }
+                        .frame(width: tuckRight ? 0 : nil, alignment: .trailing)
+                        .clipShape(NotchSideClip(notchOnTrailingEdge: false))
                 }
-        }
-        .overlay {
+                .frame(height: rowHeight)
+                .fixedSize()
+
+                if expanded {
+                    ExpandedPanel(store: store)
+                        .frame(width: NotchMetrics.panelWidth)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                            panelHeight = height
+                        }
+                        .padding(.top, rowHeight)
+                        // Arriving, the sections stagger in on their own; leaving, it all fades fast.
+                        .transition(.asymmetric(insertion: .identity,
+                                                removal: .opacity.animation(.easeIn(duration: 0.12))))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .clipShape(IslandShape(metrics: metrics))
+
             if Preferences.shared.glow && active {
-                GlowOutline(bar: bar, topRadius: topRadius, bottomRadius: bottomRadius)
-                    .padding(trim)
+                GlowOutline(bar: bar, metrics: metrics)
+                    .allowsHitTesting(false)
                     .transition(.opacity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .contentShape(IslandShape(metrics: metrics))
+        .contextMenu { SettingsMenuItems(store: store) }
         .jelly(trigger: store.attentionPulse)
         .opacity(geometry.hasNotch || open ? 1 : 0)
-        .contextMenu { SettingsMenuItems(store: store) }
         .environment(\.motionEnabled, model.pointerOnScreen || expanded)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .animation(.spring(response: 0.42, dampingFraction: 0.8), value: expanded)
+        .onChange(of: metrics, initial: true) { _, target in model.islandTarget = target }
+        .animation(expanded ? Motion.open : Motion.close, value: expanded)
+        .animation(Motion.resize, value: panelHeight)
         .animation(.spring(response: 0.38, dampingFraction: 0.92), value: tuckLeft)
         .animation(.spring(response: 0.38, dampingFraction: 0.92), value: tuckRight)
         .animation(.spring(response: 0.5, dampingFraction: 0.76), value: bar)
@@ -179,6 +199,8 @@ private struct LeadingEar: View {
                         .transition(.pop)
                 }
                 ActivityLabel(bar: bar, compact: Preferences.shared.compactBar || expanded)
+                    // Animated text is redrawn on the CPU every frame; just swap it.
+                    .animation(nil, value: expanded)
                     .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
                     .lineLimit(1)
             } else if expanded {

@@ -29,8 +29,8 @@ final class NotchViewModel {
     var tuckLeft = false
     var tuckRight = false
     var pointerOnScreen = true
-    /// The island's frame in window coordinates (top-left origin), for hit testing.
-    @ObservationIgnored var shapeFrame: CGRect = .zero
+    /// Where the island is heading (not where it is mid-animation), for hit testing.
+    @ObservationIgnored var islandTarget = IslandMetrics.zero
     /// The ears' natural content widths, still known while they're tucked.
     @ObservationIgnored var leftEarWidth: CGFloat = 0
     @ObservationIgnored var rightEarWidth: CGFloat = 0
@@ -229,7 +229,9 @@ final class NotchWindowController {
 
     /// The open panel plus a little slack, so it doesn't flicker shut at the edges.
     private func openRect() -> CGRect {
-        screenRect(model.shapeFrame).insetBy(dx: -4, dy: -4)
+        let window = panel.frame
+        let island = model.islandTarget.rect(in: CGRect(origin: .zero, size: window.size))
+        return screenRect(island).insetBy(dx: -4, dy: -4)
     }
 
     /// A frame in the window's top-left coordinates, in screen coordinates.

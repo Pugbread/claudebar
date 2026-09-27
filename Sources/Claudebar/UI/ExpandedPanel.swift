@@ -6,7 +6,7 @@ struct ExpandedPanel: View {
     @State private var previewing: MediaItem?
 
     var body: some View {
-        let sessions = store.visibleSessions
+        let sessions = Array(store.visibleSessions.prefix(4))
         VStack(alignment: .leading, spacing: 10) {
             if !store.media.isEmpty {
                 MediaShelf(store: store, previewing: $previewing)
@@ -16,9 +16,9 @@ struct ExpandedPanel: View {
                     if sessions.isEmpty {
                         IdleSummary(store: store)
                     } else {
-                        ForEach(Array(sessions.prefix(4).enumerated()), id: \.element.id) { index, session in
+                        ForEach(Array(sessions.enumerated()), id: \.element.id) { index, session in
                             SessionCard(session: session, primary: index == 0, store: store)
-                                .transition(.blurFade)
+                                .transition(.settle)
                         }
                     }
                     FooterBar(store: store)
@@ -26,7 +26,7 @@ struct ExpandedPanel: View {
                 if let item = previewing {
                     MediaPreview(item: item)
                         .id(item.path)
-                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                        .transition(.opacity.combined(with: .offset(y: -8)))
                         .zIndex(1)
                 }
             }
@@ -34,6 +34,13 @@ struct ExpandedPanel: View {
         .padding(.top, 10)
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: sessions.map(\.id))
         .animation(.spring(response: 0.28, dampingFraction: 0.88), value: previewing?.path)
+    }
+}
+
+extension AnyTransition {
+    /// A card arriving or leaving while the panel is open: a short drop and fade.
+    static var settle: AnyTransition {
+        .opacity.combined(with: .offset(y: -6))
     }
 }
 
@@ -193,9 +200,9 @@ private struct StatusLine: View {
         Group {
             switch session.phase {
             case .thinking:
-                Text("Thinking…").shimmer(base: session.agent.accent.opacity(0.8))
+                ShimmerText(text: "Thinking…", base: session.agent.accent.opacity(0.8))
             case .compacting:
-                Text("Compacting context…").shimmer(base: Palette.indigo.opacity(0.9))
+                ShimmerText(text: "Compacting context…", base: Palette.indigo.opacity(0.9))
             case .tool:
                 if let tool = session.currentTool {
                     HStack(spacing: 5) {
