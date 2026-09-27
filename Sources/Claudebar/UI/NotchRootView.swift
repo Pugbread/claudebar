@@ -2,6 +2,18 @@ import SwiftUI
 
 enum NotchMetrics {
     static let expandedWidth: CGFloat = 600
+    /// Collapsed island: its shoulder radius plus the padding between the shape's edge and the content.
+    static let collapsedInset: CGFloat = 18
+
+    /// The gap the ears sit either side of while the island is out.
+    static func openGap(_ geometry: NotchGeometry) -> CGFloat {
+        geometry.hasNotch ? geometry.notchWidth + 18 : 16
+    }
+
+    /// The stretch of the top edge that opens the panel: the notch, or the island's middle.
+    static func triggerWidth(_ geometry: NotchGeometry) -> CGFloat {
+        geometry.hasNotch ? geometry.notchWidth : 80
+    }
 }
 
 struct NotchRootView: View {
@@ -16,6 +28,9 @@ struct NotchRootView: View {
         let expanded = model.hovered
         let active = bar.mode != .idle
         let open = active || expanded
+        // The side the pointer is close to slides into the notch; the other side stays out.
+        let tuckLeft = model.tuckLeft && active && !expanded
+        let tuckRight = model.tuckRight && active && !expanded
 
         let topRadius: CGFloat = expanded ? 14 : 8
         let bottomRadius: CGFloat = expanded ? 26 : (open ? 14 : 11)
@@ -23,28 +38,42 @@ struct NotchRootView: View {
         // Idle on a notched screen the island shrinks to sit just inside the real notch,
         // so it "emerges" from the hardware when something starts.
         let gap: CGFloat = geometry.hasNotch
-            ? (open ? geometry.notchWidth + 18 : max(0, geometry.notchWidth - 8 - 2 * inset))
-            : (open ? 16 : 0)
+            ? (open ? NotchMetrics.openGap(geometry) : max(0, geometry.notchWidth - 8 - 2 * inset))
+            : (open ? NotchMetrics.openGap(geometry) : 0)
         let rowHeight = open ? geometry.notchHeight : geometry.notchHeight - 2
         let contentWidth = NotchMetrics.expandedWidth - 2 * inset
 
         // The ears layout is symmetric so the gap stays on the notch, but the black
         // shape only covers each ear's actual content: the short side stays short and
-        // leaves the menu bar underneath it alone.
-        let ear = max(leadingWidth, trailingWidth)
-        let trim = EdgeInsets(top: 0, leading: expanded ? 0 : ear - leadingWidth,
-                              bottom: 0, trailing: expanded ? 0 : ear - trailingWidth)
+        // leaves the menu bar underneath it alone. A tucked side goes further: its edge
+        // slides in past the padding until it's just inside the hardware notch.
+        let leftShown = tuckLeft ? 0 : leadingWidth
+        let rightShown = tuckRight ? 0 : trailingWidth
+        let ear = max(leftShown, rightShown)
+        let tuckDepth = inset + (gap - (geometry.hasNotch ? geometry.notchWidth : 0)) / 2 + 4
+        let trim = EdgeInsets(top: 0,
+                              leading: expanded ? 0 : ear - leftShown + (tuckLeft ? tuckDepth : 0),
+                              bottom: 0,
+                              trailing: expanded ? 0 : ear - rightShown + (tuckRight ? tuckDepth : 0))
 
         VStack(spacing: 0) {
             EarsLayout(gap: gap) {
+                // Measured before the tuck frame, so these stay the ears' natural widths.
                 LeadingEar(bar: bar, expanded: expanded)
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                        model.leftEarWidth = width
                         withAnimation(.spring(response: 0.5, dampingFraction: 0.76)) { leadingWidth = width }
                     }
+                    // Tucking collapses the ear toward the notch; the content rides along into it.
+                    .frame(width: tuckLeft ? 0 : nil, alignment: .leading)
+                    .clipShape(NotchSideClip(notchOnTrailingEdge: true))
                 TrailingEar(bar: bar, store: store, expanded: expanded)
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                        model.rightEarWidth = width
                         withAnimation(.spring(response: 0.5, dampingFraction: 0.76)) { trailingWidth = width }
                     }
+                    .frame(width: tuckRight ? 0 : nil, alignment: .trailing)
+                    .clipShape(NotchSideClip(notchOnTrailingEdge: false))
             }
             .frame(height: rowHeight)
             .fixedSize(horizontal: !expanded, vertical: false)
@@ -81,7 +110,21 @@ struct NotchRootView: View {
         .environment(\.motionEnabled, model.pointerOnScreen || expanded)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(.spring(response: 0.42, dampingFraction: 0.8), value: expanded)
+        .animation(.spring(response: 0.38, dampingFraction: 0.92), value: tuckLeft)
+        .animation(.spring(response: 0.38, dampingFraction: 0.92), value: tuckRight)
         .animation(.spring(response: 0.5, dampingFraction: 0.76), value: bar)
+    }
+}
+
+/// Clips an ear only on its notch side, so tucked content disappears into the notch while
+/// glows on the outer side aren't cut off.
+private struct NotchSideClip: Shape {
+    let notchOnTrailingEdge: Bool
+
+    func path(in rect: CGRect) -> Path {
+        let bleed: CGFloat = 60
+        let x = notchOnTrailingEdge ? rect.minX - bleed : rect.minX
+        return Path(CGRect(x: x, y: rect.minY - bleed, width: rect.width + bleed, height: rect.height + bleed * 2))
     }
 }
 

@@ -25,9 +25,15 @@ struct NotchGeometry: Equatable {
 final class NotchViewModel {
     let geometry: NotchGeometry
     var hovered = false
+    /// An ear tucked into the notch because the pointer is close to it.
+    var tuckLeft = false
+    var tuckRight = false
     var pointerOnScreen = true
     /// The island's frame in window coordinates (top-left origin), for hit testing.
     @ObservationIgnored var shapeFrame: CGRect = .zero
+    /// The ears' natural content widths, still known while they're tucked.
+    @ObservationIgnored var leftEarWidth: CGFloat = 0
+    @ObservationIgnored var rightEarWidth: CGFloat = 0
 
     init(geometry: NotchGeometry) {
         self.geometry = geometry
@@ -63,7 +69,13 @@ final class NotchHostingView<Content: View>: NSHostingView<Content> {
 /// events while the pointer is over the island, and hands them back when it leaves.
 @MainActor
 final class NotchWindowController {
-    private static let windowSize = CGSize(width: 860, height: 560)
+    private static let windowSize = CGSize(width: 860, height: 760)
+    /// How long the pointer has to rest on the notch before the panel opens, so passing
+    /// through on the way somewhere else doesn't.
+    private static let hoverIntent: TimeInterval = 0.3
+    /// How far past an ear's outer end still counts as "on" it. Nothing below the bar counts:
+    /// being under it shouldn't move it.
+    private static let nearMargin = CGSize(width: 12, height: 0)
 
     let model: NotchViewModel
     private let screen: NSScreen
@@ -71,6 +83,7 @@ final class NotchWindowController {
     private let store: SessionStore
     private var enterWork: DispatchWorkItem?
     private var exitWork: DispatchWorkItem?
+    private var untuckWork: [ReferenceWritableKeyPath<NotchViewModel, Bool>: DispatchWorkItem] = [:]
     private var pollTimer: Timer?
     private var pinnedUntil = Date.distantPast
 
@@ -97,6 +110,7 @@ final class NotchWindowController {
         pollTimer?.invalidate()
         enterWork?.cancel()
         exitWork?.cancel()
+        untuckWork.values.forEach { $0.cancel() }
         panel.orderOut(nil)
         panel.close()
     }
@@ -114,16 +128,42 @@ final class NotchWindowController {
         if model.pointerOnScreen != onScreen { model.pointerOnScreen = onScreen }
 
         if Date() < pinnedUntil { return }
-        if hotRect().contains(pointer) {
-            exitWork?.cancel()
-            exitWork = nil
-            guard !model.hovered, enterWork == nil else { return }
-            enterWork = schedule(after: 0.08) { $0.setHovered(true) }
-        } else {
-            enterWork?.cancel()
-            enterWork = nil
-            guard model.hovered, exitWork == nil else { return }
-            exitWork = schedule(after: 0.3) { $0.setHovered(false) }
+
+        if model.hovered {
+            if openRect().contains(pointer) {
+                exitWork?.cancel()
+                exitWork = nil
+            } else if exitWork == nil {
+                exitWork = schedule(after: 0.3) { $0.setHovered(false) }
+            }
+            return
+        }
+
+        // Only the middle opens the panel. Mid-drag (a window, a selection) never does.
+        if triggerRect().contains(pointer) {
+            guard enterWork == nil, NSEvent.pressedMouseButtons == 0 else { return }
+            enterWork = schedule(after: Self.hoverIntent) { $0.setHovered(true) }
+            return
+        }
+        enterWork?.cancel()
+        enterWork = nil
+
+        // Near an ear, that ear tucks into the notch so the menu bar under it is reachable.
+        let zones = nearZones()
+        setTucked(\.tuckLeft, near: zones.left.contains(pointer))
+        setTucked(\.tuckRight, near: zones.right.contains(pointer))
+    }
+
+    /// Tucks a side straight away; brings it back out a moment after the pointer leaves.
+    private func setTucked(_ side: ReferenceWritableKeyPath<NotchViewModel, Bool>, near: Bool) {
+        if near {
+            untuckWork.removeValue(forKey: side)?.cancel()
+            if !model[keyPath: side] { model[keyPath: side] = true }
+        } else if model[keyPath: side], untuckWork[side] == nil {
+            untuckWork[side] = schedule(after: 0.25) { controller in
+                controller.untuckWork[side] = nil
+                controller.model[keyPath: side] = false
+            }
         }
     }
 
@@ -157,12 +197,44 @@ final class NotchWindowController {
         }
     }
 
-    private func hotRect() -> CGRect {
-        let frame = model.shapeFrame
+    /// The notch itself (on a notchless display, the middle of the island): the only place that
+    /// opens the panel.
+    private func triggerRect() -> CGRect {
+        let geometry = model.geometry
         // A floating island on a notchless screen is invisible while idle; don't let it catch the pointer.
-        guard frame.width > 1, model.geometry.hasNotch || model.hovered || store.presentation.mode != .idle else { return .zero }
+        guard geometry.hasNotch || store.presentation.mode != .idle else { return .zero }
+        let width = NotchMetrics.triggerWidth(geometry)
+        // Reach above the screen's top edge so the topmost pixel row still counts.
+        return CGRect(x: screen.frame.midX - width / 2, y: screen.frame.maxY - geometry.notchHeight,
+                      width: width, height: geometry.notchHeight + 2)
+    }
+
+    /// The areas around each ear that count as "close", from its outer end in to where the
+    /// notch trigger starts. Built from the ears' natural widths, so tucking an ear doesn't
+    /// take the pointer out of range and bounce it straight back out.
+    private func nearZones() -> (left: CGRect, right: CGRect) {
+        guard store.presentation.mode != .idle else { return (.zero, .zero) }
+        let geometry = model.geometry
+        let margin = Self.nearMargin
+        let midX = screen.frame.midX
+        let reach = NotchMetrics.openGap(geometry) / 2 + NotchMetrics.collapsedInset + margin.width
+        let inner = NotchMetrics.triggerWidth(geometry) / 2
+        let y = screen.frame.maxY - geometry.notchHeight - margin.height
+        let height = geometry.notchHeight + margin.height + 2
+        let leftOuter = midX - reach - model.leftEarWidth
+        let rightOuter = midX + reach + model.rightEarWidth
+        return (CGRect(x: leftOuter, y: y, width: max(0, midX - inner - leftOuter), height: height),
+                CGRect(x: midX + inner, y: y, width: max(0, rightOuter - midX - inner), height: height))
+    }
+
+    /// The open panel plus a little slack, so it doesn't flicker shut at the edges.
+    private func openRect() -> CGRect {
+        screenRect(model.shapeFrame).insetBy(dx: -4, dy: -4)
+    }
+
+    /// A frame in the window's top-left coordinates, in screen coordinates.
+    private func screenRect(_ frame: CGRect) -> CGRect {
         let window = panel.frame
         return CGRect(x: window.minX + frame.minX, y: window.maxY - frame.maxY, width: frame.width, height: frame.height)
-            .insetBy(dx: -4, dy: -4)
     }
 }
