@@ -27,7 +27,8 @@ struct MediaShelf: View {
             .foregroundStyle(Palette.faint)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
+                // Lazy: only the thumbnails in view get built when the panel opens.
+                LazyHStack(spacing: 8) {
                     ForEach(store.media) { item in
                         MediaThumb(item: item, highlighted: previewing == item)
                             .onHoverAlways { inside in
@@ -52,6 +53,8 @@ struct MediaShelf: View {
                 .padding(.vertical, 3)
                 .padding(.horizontal, 1)
             }
+            // A lazy row can't report its height up front; without this it fills the panel.
+            .frame(height: 64)
         }
         .padding(.horizontal, 6)
     }
@@ -60,17 +63,14 @@ struct MediaShelf: View {
 private struct MediaThumb: View {
     let item: MediaItem
     let highlighted: Bool
-    @State private var image: NSImage?
+    @State private var image: CGImage?
     @State private var duration: String?
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.white.opacity(0.06))
             if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFill()
+                PictureLayer(image: image, fill: true, cornerRadius: 9)
                     .frame(width: 84, height: 58)
             }
             if item.kind == .video {
@@ -109,7 +109,7 @@ private struct MediaThumb: View {
 /// videos play muted on a loop.
 struct MediaPreview: View {
     let item: MediaItem
-    @State private var image: NSImage?
+    @State private var image: CGImage?
     @State private var detail: String?
 
     var body: some View {
@@ -119,7 +119,7 @@ struct MediaPreview: View {
                 if item.kind == .video {
                     LoopingVideo(url: item.url)
                 } else if let image {
-                    Image(nsImage: image).resizable().interpolation(.high).scaledToFit()
+                    PictureLayer(image: image, fill: false)
                 }
             }
             .frame(height: 300)
@@ -149,7 +149,11 @@ struct MediaPreview: View {
         .background(Color(white: 0.07))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
-        .shadow(color: .black.opacity(0.6), radius: 20, y: 10)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.black)
+                .shadow(color: .black.opacity(0.6), radius: 20, y: 10)
+        )
         .task(id: item.path) {
             if item.kind == .image {
                 image = await MediaThumbnails.shared.image(for: item.url, maxSide: 1100)
@@ -165,9 +169,9 @@ struct MediaPreview: View {
 @MainActor
 final class MediaThumbnails {
     static let shared = MediaThumbnails()
-    private var images: [String: NSImage] = [:]
+    private var images: [String: CGImage] = [:]
 
-    func image(for url: URL, maxSide: CGFloat) async -> NSImage? {
+    func image(for url: URL, maxSide: CGFloat) async -> CGImage? {
         let modified = MediaScanner.modificationDate(of: url.path)?.timeIntervalSince1970 ?? 0
         let key = "\(url.path)|\(Int(maxSide))|\(modified)"
         if let cached = images[key] { return cached }
@@ -176,9 +180,10 @@ final class MediaThumbnails {
         guard let representation = try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: request) else {
             return nil
         }
+        let pixels = representation.cgImage
         if images.count > 80 { images.removeAll() }
-        images[key] = representation.nsImage
-        return representation.nsImage
+        images[key] = pixels
+        return pixels
     }
 
     func duration(of url: URL) async -> String? {
@@ -192,6 +197,56 @@ final class MediaThumbnails {
               let width = properties[kCGImagePropertyPixelWidth] as? Int,
               let height = properties[kCGImagePropertyPixelHeight] as? Int else { return nil }
         return "\(width)×\(height)"
+    }
+}
+
+/// A picture drawn by Core Animation and scaled on the GPU. SwiftUI's own image drawing
+/// cut these off: Quick Look's Retina image came out as its top-left quarter, and large images
+/// (drawn in a scaled layer of their own) had the card's rounded clip land on one corner.
+private struct PictureLayer: NSViewRepresentable {
+    let image: CGImage
+    /// Fill the frame and crop the overflow (thumbnails), or fit inside it (the preview).
+    let fill: Bool
+    var cornerRadius: CGFloat = 0
+
+    func makeNSView(context: Context) -> PictureView {
+        PictureView(frame: .zero)
+    }
+
+    func updateNSView(_ view: PictureView, context: Context) {
+        view.show(image, fill: fill, cornerRadius: cornerRadius)
+    }
+
+    final class PictureView: NSView {
+        private var shown: CGImage?
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+            layerContentsRedrawPolicy = .never
+            layer?.masksToBounds = true
+            layer?.minificationFilter = .trilinear
+            layer?.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()]
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) is not supported")
+        }
+
+        func show(_ image: CGImage, fill: Bool, cornerRadius: CGFloat) {
+            guard let layer else { return }
+            if shown !== image {
+                shown = image
+                layer.contents = image
+            }
+            layer.contentsGravity = fill ? .resizeAspectFill : .resizeAspect
+            layer.cornerRadius = cornerRadius
+            layer.cornerCurve = .continuous
+        }
+
+        // Clicks and hovers belong to the thumbnail around it.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }
 
