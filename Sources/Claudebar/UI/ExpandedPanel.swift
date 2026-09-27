@@ -2,22 +2,38 @@ import SwiftUI
 
 struct ExpandedPanel: View {
     let store: SessionStore
+    /// The shelf item whose thumbnail is under the pointer, shown big over the cards.
+    @State private var previewing: MediaItem?
 
     var body: some View {
         let sessions = store.visibleSessions
-        VStack(alignment: .leading, spacing: 8) {
-            if sessions.isEmpty {
-                IdleSummary(store: store)
-            } else {
-                ForEach(Array(sessions.prefix(4).enumerated()), id: \.element.id) { index, session in
-                    SessionCard(session: session, primary: index == 0, store: store)
-                        .transition(.blurFade)
+        VStack(alignment: .leading, spacing: 10) {
+            if !store.media.isEmpty {
+                MediaShelf(store: store, previewing: $previewing)
+            }
+            ZStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 8) {
+                    if sessions.isEmpty {
+                        IdleSummary(store: store)
+                    } else {
+                        ForEach(Array(sessions.prefix(4).enumerated()), id: \.element.id) { index, session in
+                            SessionCard(session: session, primary: index == 0, store: store)
+                                .transition(.blurFade)
+                        }
+                    }
+                    FooterBar(store: store)
+                }
+                if let item = previewing {
+                    MediaPreview(item: item)
+                        .id(item.path)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                        .zIndex(1)
                 }
             }
-            FooterBar(store: store)
         }
         .padding(.top, 10)
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: sessions.map(\.id))
+        .animation(.spring(response: 0.28, dampingFraction: 0.88), value: previewing?.path)
     }
 }
 

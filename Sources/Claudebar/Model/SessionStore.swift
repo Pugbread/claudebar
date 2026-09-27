@@ -36,9 +36,15 @@ final class SessionStore {
     private(set) var eventsReceived = 0
     /// Bumped whenever the bar should do its attention wobble.
     private(set) var attentionPulse = 0
+    /// Images and videos agents touched, newest first, for the shelf in the panel.
+    private(set) var media: [MediaItem] = []
 
     @ObservationIgnored private var timers: [Timer] = []
     @ObservationIgnored private var sessionsDirty = false
+    @ObservationIgnored private var mediaDirty = false
+    /// Per Codex session, when its generated_images folder was last looked at.
+    @ObservationIgnored private var codexImagesCheckedAt: [String: Date] = [:]
+    private static let mediaLimit = 30
     @ObservationIgnored private let prefs = Preferences.shared
     @ObservationIgnored private let isoFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -115,8 +121,13 @@ final class SessionStore {
             let failed = env.event == "PostToolUseFailure"
             let delta = failed ? nil : DiffCounter.delta(tool: tool, input: env.dict("tool_input"), response: env.payload["tool_response"])
             session.ensureTurn(at: now)
-            session.finishTool(id: env.string("tool_use_id") ?? "", failed: failed, delta: delta,
+            let toolID = env.string("tool_use_id") ?? ""
+            let startedAt = session.activities.last { $0.id == toolID }?.startedAt ?? now
+            session.finishTool(id: toolID, failed: failed, delta: delta,
                                durationMs: env.int("duration_ms"), at: now)
+            if !failed, !session.isDemo {
+                recordMedia(from: env, tool: tool, in: session, startedAt: startedAt)
+            }
             if !session.isDemo {
                 updateToday { stats in
                     stats.tools += 1
@@ -298,6 +309,7 @@ final class SessionStore {
     /// Written every few seconds when something changed, so a relaunch (update, crash,
     /// reboot) doesn't blank the bar until each session's next event.
     func saveSessions() {
+        saveMedia()
         guard sessionsDirty else { return }
         sessionsDirty = false
         let snapshots = sessions.values.filter { !$0.isDemo }.map(\.snapshot)
@@ -325,6 +337,97 @@ final class SessionStore {
             if session.phase.isWorking { reconcile(session) }
         }
         refreshHeadline()
+        restoreMedia()
+    }
+
+    // MARK: - Media shelf
+
+    private static var mediaURL: URL { sessionsURL.deletingLastPathComponent().appendingPathComponent("media.json") }
+
+    /// Picks up the images and videos a finished tool call touched: files it read, wrote or
+    /// named in a command, and images it returned inline (renders, screenshots).
+    private func recordMedia(from env: HookEnvelope, tool: String, in session: Session, startedAt: Date) {
+        let input = env.dict("tool_input")
+        let response = env.payload["tool_response"]
+        for path in MediaScanner.files(tool: tool, input: input, response: response, cwd: session.cwd) {
+            let changed = MediaScanner.modificationDate(of: path).map { $0 >= startedAt.addingTimeInterval(-2) } ?? false
+            addMedia(path, from: session, action: tool == "Write" || changed ? "made" : "opened")
+        }
+        // A Read of an image returns the image too; the file itself is already on the shelf.
+        guard tool != "Read", tool != "view_image" else { return }
+        let (label, detail) = ToolDescriber.describe(tool: tool, input: input)
+        for image in MediaScanner.inlineImages(in: response) {
+            if let path = MediaScanner.cache(image) {
+                addMedia(path, from: session, action: detail.isEmpty ? label : detail)
+            }
+        }
+    }
+
+    private func addMedia(_ path: String, from session: Session, action: String) {
+        guard let kind = MediaScanner.kind(of: path) else { return }
+        media.removeAll { $0.path == path }
+        media.insert(MediaItem(path: path, kind: kind, seenAt: Date(), agent: session.agent,
+                               session: session.displayName, action: action), at: 0)
+        while media.count > Self.mediaLimit {
+            forgetCachedFile(media.removeLast())
+        }
+        mediaDirty = true
+    }
+
+    func removeMedia(_ item: MediaItem) {
+        media.removeAll { $0.path == item.path }
+        forgetCachedFile(item)
+        mediaDirty = true
+    }
+
+    func clearMedia() {
+        media.forEach(forgetCachedFile)
+        media = []
+        mediaDirty = true
+    }
+
+    /// Inline images live in our cache; once off the shelf, nothing else needs them.
+    private func forgetCachedFile(_ item: MediaItem) {
+        if item.path.hasPrefix(MediaScanner.cacheDirectory.path) {
+            try? FileManager.default.removeItem(atPath: item.path)
+        }
+    }
+
+    /// Codex's own image generation doesn't go through a hook; it saves into a folder per session.
+    private func collectCodexImages() {
+        for session in sessions.values where session.agent == .codex && !session.isDemo {
+            let since = codexImagesCheckedAt[session.id] ?? session.turnStart ?? session.lastEventAt
+            codexImagesCheckedAt[session.id] = Date()
+            for path in MediaScanner.codexGenerated(sessionID: session.id, since: since) {
+                addMedia(path, from: session, action: "generated")
+            }
+        }
+    }
+
+    private func pruneMissingMedia() {
+        let before = media.count
+        media.removeAll { !FileManager.default.fileExists(atPath: $0.path) }
+        if media.count != before { mediaDirty = true }
+    }
+
+    private func saveMedia() {
+        guard mediaDirty else { return }
+        mediaDirty = false
+        try? JSONEncoder().encode(media).write(to: Self.mediaURL, options: .atomic)
+    }
+
+    private func restoreMedia() {
+        if let data = try? Data(contentsOf: Self.mediaURL),
+           let items = try? JSONDecoder().decode([MediaItem].self, from: data) {
+            media = items.filter { FileManager.default.fileExists(atPath: $0.path) }
+        }
+        // Drop cached inline images nothing on the shelf points at any more.
+        let kept = Set(media.map(\.path))
+        let cached = (try? FileManager.default.contentsOfDirectory(atPath: MediaScanner.cacheDirectory.path)) ?? []
+        for name in cached {
+            let path = MediaScanner.cacheDirectory.appendingPathComponent(name).path
+            if !kept.contains(path) { try? FileManager.default.removeItem(atPath: path) }
+        }
     }
 
     /// A session restored mid-turn may have finished while Claudebar was down. Its
@@ -514,6 +617,8 @@ final class SessionStore {
             }
         }
         if today.day != DayStats.key() { today = DayStats(day: DayStats.key()) }
+        collectCodexImages()
+        pruneMissingMedia()
         refreshHeadline()
     }
 

@@ -67,9 +67,17 @@ an amber "needs you", since Codex decides them without asking you.
 | Compacting | indigo spark, level meter rolling like a wave |
 | Several sessions | a count badge; the bar follows whichever needs attention |
 
-Hover the notch to expand it. Click a session card to jump to its app. Right-click (or use
-the gear) for Sounds, Glow, Compact bar (icon only, for crowded menu bars), Show on all
-displays, Launch at login, and **Play demo**.
+Rest the pointer inside the notch to expand it; it stays out of the way otherwise. Move over
+either side of the bar and that side slides into the notch, so the menu bar under it is
+reachable. Click a session card to jump to its app. Right-click (or use the gear) for Sounds,
+Glow, Compact bar (icon only, for crowded menu bars), Show on all displays, Launch at login,
+and **Play demo**.
+
+**Media shelf.** Images and videos an agent touches show up as thumbnails at the top of the
+expanded panel: files it reads or writes, paths in commands it runs (`ffmpeg … out.mp4`,
+`plt.savefig("chart.png")`), images MCP tools return inline (renders, screenshots), and images
+Codex generates. Hover one to see it big (videos play muted on a loop), click to open it,
+right-click to show it in Finder or take it off the shelf. The last 30 are kept.
 
 Sounds only play when the session's app isn't already in front.
 
