@@ -77,7 +77,8 @@ and **Play demo**.
 expanded panel: files it reads or writes, paths in commands it runs (`ffmpeg … out.mp4`,
 `plt.savefig("chart.png")`), images MCP tools return inline (renders, screenshots), and images
 Codex generates. Hover one to see it big (videos play muted on a loop), click to open it,
-right-click to show it in Finder or take it off the shelf. The last 30 are kept.
+drag it into another app to drop a copy of the file there, right-click to show it in Finder or
+take it off the shelf. The last 30 are kept.
 
 Sounds only play when the session's app isn't already in front.
 

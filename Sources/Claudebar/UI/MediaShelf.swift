@@ -30,7 +30,9 @@ struct MediaShelf: View {
                 // Lazy: only the thumbnails in view get built when the panel opens.
                 LazyHStack(spacing: 8) {
                     ForEach(store.media) { item in
-                        MediaThumb(item: item, highlighted: previewing == item)
+                        MediaThumb(item: item, highlighted: previewing == item,
+                                   onOpen: { NSWorkspace.shared.open(item.url) },
+                                   onDragOut: { previewing = nil })
                             .onHoverAlways { inside in
                                 if inside {
                                     previewing = item
@@ -38,7 +40,6 @@ struct MediaShelf: View {
                                     previewing = nil
                                 }
                             }
-                            .onTapGesture { NSWorkspace.shared.open(item.url) }
                             .contextMenu {
                                 Button("Open") { NSWorkspace.shared.open(item.url) }
                                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
@@ -63,6 +64,8 @@ struct MediaShelf: View {
 private struct MediaThumb: View {
     let item: MediaItem
     let highlighted: Bool
+    let onOpen: () -> Void
+    let onDragOut: () -> Void
     @State private var image: CGImage?
     @State private var duration: String?
 
@@ -96,6 +99,7 @@ private struct MediaThumb: View {
             // Whose session touched it.
             Circle().fill(item.agent.accent).frame(width: 5, height: 5).padding(5)
         }
+        .overlay(FileDragSource(url: item.url, picture: image, cornerRadius: 9, onClick: onOpen, onDragStart: onDragOut))
         .scaleEffect(highlighted ? 1.05 : 1)
         .animation(.spring(response: 0.25, dampingFraction: 0.8), value: highlighted)
         .task(id: item.path) {
@@ -247,6 +251,107 @@ private struct PictureLayer: NSViewRepresentable {
 
         // Clicks and hovers belong to the thumbnail around it.
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
+
+/// Clicking a thumbnail opens its file; dragging it drops the file into another app (Finder,
+/// a chat, an editor). An AppKit drag, so the file goes out as a plain file URL every app takes,
+/// and only as a copy: Finder never moves it out of the agent's project.
+private struct FileDragSource: NSViewRepresentable {
+    let url: URL
+    /// The thumbnail, lifted as the drag image.
+    let picture: CGImage?
+    let cornerRadius: CGFloat
+    let onClick: () -> Void
+    let onDragStart: () -> Void
+
+    func makeNSView(context: Context) -> DragView {
+        DragView(frame: .zero)
+    }
+
+    func updateNSView(_ view: DragView, context: Context) {
+        view.url = url
+        view.picture = picture
+        view.cornerRadius = cornerRadius
+        view.onClick = onClick
+        view.onDragStart = onDragStart
+    }
+
+    final class DragView: NSView, NSDraggingSource {
+        /// The view a drag started from, kept alive until it lands: the panel closes when the
+        /// pointer leaves it, taking the thumbnail with it.
+        private static var dragging: DragView?
+        private static let dragThreshold: CGFloat = 4
+
+        var url: URL?
+        var picture: CGImage?
+        var cornerRadius: CGFloat = 0
+        var onClick: (() -> Void)?
+        var onDragStart: (() -> Void)?
+        private var mouseDownAt: NSPoint?
+
+        // The panel is never key, so the first click has to count.
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        // Only plain left clicks land here. Hovers, scrolling and the context menu (right or
+        // control click) stay with the SwiftUI thumbnail underneath.
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard let event = NSApp.currentEvent, event.type == .leftMouseDown,
+                  !event.modifierFlags.contains(.control) else { return nil }
+            return super.hitTest(point)
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            mouseDownAt = event.locationInWindow
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let start = mouseDownAt, let url else { return }
+            let point = event.locationInWindow
+            guard hypot(point.x - start.x, point.y - start.y) >= Self.dragThreshold else { return }
+            mouseDownAt = nil
+
+            let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+            let (frame, image) = dragImage(for: url)
+            item.setDraggingFrame(frame, contents: image)
+            Self.dragging = self
+            beginDraggingSession(with: [item], event: event, source: self)
+            onDragStart?()
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            if mouseDownAt != nil { onClick?() }
+            mouseDownAt = nil
+        }
+
+        func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+            .copy
+        }
+
+        func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+            Self.dragging = nil
+        }
+
+        /// The thumbnail as it looks on the shelf, or the file's icon at its own square size
+        /// while the thumbnail is still loading.
+        private func dragImage(for url: URL) -> (NSRect, NSImage) {
+            guard let picture else {
+                let side = min(bounds.width, bounds.height)
+                let frame = NSRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2, width: side, height: side)
+                return (frame, NSWorkspace.shared.icon(forFile: url.path))
+            }
+            let radius = cornerRadius
+            let image = NSImage(size: bounds.size, flipped: false) { rect in
+                let scale = max(rect.width / CGFloat(picture.width), rect.height / CGFloat(picture.height))
+                let size = CGSize(width: CGFloat(picture.width) * scale, height: CGFloat(picture.height) * scale)
+                NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).addClip()
+                NSGraphicsContext.current?.cgContext.draw(
+                    picture, in: CGRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2,
+                                        width: size.width, height: size.height))
+                return true
+            }
+            return (bounds, image)
+        }
     }
 }
 
